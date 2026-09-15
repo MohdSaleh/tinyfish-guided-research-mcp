@@ -197,3 +197,4 @@ async def register_claims(research_id: str, claims: list[ClaimDraft]) -> Researc
         mapping[draft.client_ref] = cid
         if warning:
             warnings[cid] = warning
+
