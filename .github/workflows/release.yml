@@ -10,19 +10,118 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
       - uses: astral-sh/setup-uv@v6
+
+      - name: Verify release versions match tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PROJECT_VERSION="$(python - <<'PY'
+          import tomllib
+          with open('pyproject.toml', 'rb') as f:
+              print(tomllib.load(f)['project']['version'])
+          PY
+          )"
+          SERVER_VERSION="$(jq -r '.version' server.json)"
+          PACKAGE_VERSION="$(jq -r '.packages[0].version' server.json)"
+
+          test "$TAG_VERSION" = "$PROJECT_VERSION" || {
+            echo "Tag version $TAG_VERSION != pyproject.toml version $PROJECT_VERSION" >&2
+            exit 1
+          }
+          test "$TAG_VERSION" = "$SERVER_VERSION" || {
+            echo "Tag version $TAG_VERSION != server.json version $SERVER_VERSION" >&2
+            exit 1
+          }
+          test "$TAG_VERSION" = "$PACKAGE_VERSION" || {
+            echo "Tag version $TAG_VERSION != server.json package version $PACKAGE_VERSION" >&2
+            exit 1
+          }
+
       - run: uv sync --frozen --all-extras
       - run: uv run ruff check .
+      - run: uv run ruff format --check .
       - run: uv run pyright
       - run: uv run pytest
       - run: uv run python evals/run_evals.py
       - run: uv run pip-audit
+
+      - name: Validate MCP Registry metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="v1.8.1"
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/download/${VERSION}/mcp-publisher_linux_amd64.tar.gz" \
+            | tar xz mcp-publisher
+          ./mcp-publisher validate server.json
+
       - run: uv build
+
       - uses: actions/upload-artifact@v4
         with:
           name: dist
           path: dist/
+          if-no-files-found: error
+
+  publish-pypi:
+    name: Publish package to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/tinyfish-guided-research-mcp
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish package distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-mcp-registry:
+    name: Publish metadata to MCP Registry
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install mcp-publisher
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="v1.8.1"
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/download/${VERSION}/mcp-publisher_linux_amd64.tar.gz" \
+            | tar xz mcp-publisher
+          ./mcp-publisher --help >/dev/null
+
+      - name: Authenticate to MCP Registry with GitHub OIDC
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish to MCP Registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5; do
+            if ./mcp-publisher publish server.json; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              echo "MCP Registry publish failed after $attempt attempts" >&2
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
