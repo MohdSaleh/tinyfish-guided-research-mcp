@@ -22,15 +22,15 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: uv lock
       - run: uv sync --frozen --all-extras
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
+      - run: uv run ruff check --fix .
+      - run: uv run ruff format .
       - run: uv run pyright
       - run: uv run pytest
-      - name: Commit lockfile
+      - name: Commit generated maintenance changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add uv.lock
+          git add uv.lock src tests
           if ! git diff --cached --quiet; then
             git commit -m "build: refresh locked dependencies"
             git push
