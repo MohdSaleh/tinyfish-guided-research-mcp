@@ -1,0 +1,200 @@
+        # expose that fact instead of pretending it is new independent evidence.
+        if not shortlist and excluded_works:
+            review_batches.append({
+                "claim_id": g.claim_id, "mode": g.mode, "items": [],
+                "note": "retrieval_returned_only_existing_work_families",
+                "excluded_work_ids": sorted(excluded_works),
+            })
+            continue
+        items = []
+        for ctx in shortlist:
+            item = {"claim_id": g.claim_id, "claim_text": _claim_by_id(state, g.claim_id)["text"], **ctx}
+            items.append(item)
+            queue.append({"claim_id": g.claim_id, "source_id": ctx["source_id"], "objective": objective})
+        review_batches.append({"claim_id": g.claim_id, "mode": g.mode, "items": items})
+
+    if review_batches or errors:
+        state["metrics"]["retrieval_waves"] = int(state["metrics"].get("retrieval_waves", 0)) + 1
+
+    # Unique pair queue; the response itself is the complete work packet.
+    dedup = {}
+    for q in queue:
+        dedup[(q["claim_id"], q["source_id"])] = q
+    state["candidate_review_queue"] = list(dedup.values())
+    state["metrics"]["sources_presented_to_client"] += len(state["candidate_review_queue"])
+
+    if state["candidate_review_queue"]:
+        state["phase"] = "CANDIDATE_REVIEW"
+        next_action = _next(
+            "review_candidates",
+            "Review each returned claim/source pair once; this replaces screen_sources + bind_evidence + judge_evidence for gap rounds.",
+            [
+                "For each item choose RELEVANT/PARTIAL/IRRELEVANT.",
+                "If useful, copy one direct quote from item.passages and assign the bounded evidence relation.",
+                "Use RELATED_BUT_INSUFFICIENT when the passage is topical but does not establish the claim.",
+            ],
+            {"review_batches": review_batches},
+            "Every pair in review_batches is reviewed or explicitly skipped.",
+        )
+        status = "GAP_REVIEW_REQUIRED"
+    else:
+        state["phase"] = "ASSESSED"
+        next_action = _next("assess_claims", "No viable candidates survived deterministic filtering.", ["Reassess; the server will decide whether more budget remains."])
+        status = "NO_VIABLE_GAP_CANDIDATES"
+
+    persist(state)
+    return ResearchToolResponse(
+        status=status,
+        data={
+            "review_batches": review_batches,
+            "skipped_resolved": skipped,
+            "errors": errors,
+            "budget_deferred_claim_ids": [g.claim_id for g in budget_deferred],
+            "remaining_network_budget": _budget_remaining(state),
+            "gap_round": state["gap_rounds"],
+            "gap_rounds_remaining": max(0, max_rounds - state["gap_rounds"]),
+        },
+        next_action=next_action,
+        agent_rules=_agent_rules(),
+    )
+
+async def review_candidates(research_id: str, reviews: list[CandidateEvidenceReview]) -> ResearchToolResponse:
+    """Unified claim/source review: relevance + direct quote + semantic relation.
+
+    Initial broad retrieval still uses screen_sources before claims exist. Once
+    claim IDs exist, this is the preferred path for both initial evidence and
+    targeted gap evidence; bind_evidence/judge_evidence remain low-level
+    compatibility tools rather than the normal happy path.
+    """
+    state = load_state(research_id)
+    if state.get("phase") != "CANDIDATE_REVIEW":
+        return _phase_violation(state, {"CANDIDATE_REVIEW"}, "review_candidates")
+
+    active = {c["claim_id"]: c for c in _active_claims(state)}
+    queue = {(q["claim_id"], q["source_id"]): q for q in state.get("candidate_review_queue", [])}
+    supplied = {(r.claim_id, r.source_id) for r in reviews}
+    invalid = supplied - set(queue)
+    if invalid:
+        raise ValueError(f"Review pair(s) were not requested by the server: {sorted(invalid)}")
+
+    accepted_sources = set()
+    evidence_sources_to_enrich = set()
+    created = []
+    skipped = []
+    quote_failures = []
+    existing_keys = {
+        (e["claim_id"], e["source_id"], _normalize_quote(e.get("quote", ""))): e
+        for e in state.get("evidence", [])
+    }
+
+    for r in reviews:
+        claim = active.get(r.claim_id)
+        source = state.get("sources", {}).get(r.source_id)
+        if not claim or not source:
+            skipped.append({"claim_id": r.claim_id, "source_id": r.source_id, "reason": "unknown_or_inactive"})
+            continue
+        if r.verdict == "IRRELEVANT" or not source.get("mechanical_gate_passed"):
+            skipped.append({"claim_id": r.claim_id, "source_id": r.source_id, "reason": r.reason})
+            if source.get("screen_status") == "PENDING":
+                source["screen_status"] = "DEFERRED"
+            continue
+
+        source["screen_status"] = "ACCEPTED"
+        previous_verdict = source.get("client_screen_verdict")
+        if previous_verdict != "RELEVANT":
+            source["client_screen_verdict"] = r.verdict
+        source["screen_reason"] = r.reason
+        accepted_sources.add(r.source_id)
+
+        if not r.quote:
+            skipped.append({"claim_id": r.claim_id, "source_id": r.source_id, "reason": "no_quote_selected"})
+            continue
+        matched, match_type = _quote_match(_get_source_content(state, r.source_id), r.quote)
+        if not matched:
+            quote_failures.append({
+                "claim_id": r.claim_id,
+                "source_id": r.source_id,
+                "reason": match_type,
+                "suggested_passages": _top_passages(_get_source_content(state, r.source_id), claim["text"], limit=3, max_chars=900),
+            })
+            continue
+        relation = r.relation or "RELATED_BUT_INSUFFICIENT"
+        key = (r.claim_id, r.source_id, _normalize_quote(r.quote))
+        if key in existing_keys:
+            ev = existing_keys[key]
+            ev["relation"] = relation
+            ev["strength"] = r.strength
+            ev["source_relevance"] = 1.0 if r.verdict == "RELEVANT" else 0.60
+            ev["judged_at"] = time.time()
+        else:
+            ev = {
+                "evidence_id": f"ev_{uuid.uuid4().hex[:12]}",
+                "claim_id": r.claim_id,
+                "source_id": r.source_id,
+                "quote": r.quote,
+                "quote_verified": True,
+                "quote_match_type": match_type,
+                "relation": relation,
+                "strength": r.strength,
+                "source_relevance": 1.0 if r.verdict == "RELEVANT" else 0.60,
+                "created_at": time.time(),
+                "judged_at": time.time(),
+            }
+            state["evidence"].append(ev)
+            existing_keys[key] = ev
+        created.append({
+            "evidence_id": ev["evidence_id"], "claim_id": r.claim_id, "source_id": r.source_id,
+            "relation": relation, "quote_match_type": match_type,
+        })
+        if relation in {"SUPPORTS", "CONTRADICTS"}:
+            evidence_sources_to_enrich.add(r.source_id)
+
+    if evidence_sources_to_enrich:
+        await asyncio.gather(*(_enrich_source(state["sources"][sid]) for sid in evidence_sources_to_enrich))
+
+    remaining_pairs = [q for pair, q in queue.items() if pair not in supplied]
+    state["candidate_review_queue"] = remaining_pairs
+    state["metrics"]["candidate_reviews"] += len(reviews)
+
+    if quote_failures:
+        # Failed quote pairs remain in the queue so the client can correct them
+        # using the passages returned in this response; no get_source_context is needed.
+        for f in quote_failures:
+            pair = (f["claim_id"], f["source_id"])
+            if pair not in {(q["claim_id"], q["source_id"]) for q in remaining_pairs}:
+                remaining_pairs.append(queue[pair])
+        state["candidate_review_queue"] = remaining_pairs
+
+    if remaining_pairs:
+        state["phase"] = "CANDIDATE_REVIEW"
+        next_action = _next(
+            "review_candidates", "Some claim/source pairs still need review or quote correction.",
+            ["Use data.quote_failures.suggested_passages for corrections; do not inspect server state."],
+            {"remaining_pairs": remaining_pairs, "quote_failures": quote_failures},
+        )
+        status = "CANDIDATE_REVIEW_INCOMPLETE"
+    else:
+        state["phase"] = "ASSESSED"
+        next_action = _next("assess_claims", "Gap candidates were reviewed and evidence stored.", ["Run deterministic aggregation now."])
+        status = "CANDIDATE_REVIEW_COMPLETE"
+
+    persist(state)
+    return ResearchToolResponse(
+        status=status,
+        data={"evidence_created_or_updated": created, "skipped": skipped, "quote_failures": quote_failures, "remaining_pairs": remaining_pairs},
+        next_action=next_action,
+        quality_gate={
+            "server_quote_integrity": "PASS" if not quote_failures else "PARTIAL",
+            "client_semantic_entailment": "RECORDED",
+        },
+        agent_rules=_agent_rules(),
+    )
+
+async def get_source_context(research_id: str, source_id: str, query: str = "") -> ResearchToolResponse:
+    """Return a few relevant passages from persisted full source content.
+
+    Use when the client needs a better direct quote without re-fetching the URL.
+    """
+    state = load_state(research_id)
+    source = state.get("sources", {}).get(source_id)
+    if not source:
