@@ -87,36 +87,53 @@ The goal is to give it a better process.
 
 - Python 3.11+
 - A TinyFish API key
-- `uv` recommended
+- `uv` for the recommended local one-command setup
 - PostgreSQL for remote or multi-instance deployments
 
 SQLite works fine for local development.
 
-## Installation
+## Quick install
 
-Clone the repository:
+After the package is published to PyPI, no Git clone or virtual-environment setup is required.
+
+```bash
+TINYFISH_API_KEY="your-api-key" uvx tinyfish-guided-research-mcp
+```
+
+`uvx` creates an isolated environment, installs the package and dependencies, and starts the MCP server.
+
+A typical MCP client configuration is:
+
+```json
+{
+  "mcpServers": {
+    "tinyfish-research": {
+      "command": "uvx",
+      "args": ["tinyfish-guided-research-mcp"],
+      "env": {
+        "TINYFISH_API_KEY": "your-api-key"
+      }
+    }
+  }
+}
+```
+
+The shorter compatibility command remains available as well:
+
+```bash
+uvx --from tinyfish-guided-research-mcp tinyfish-research-mcp
+```
+
+## Development install
+
+Clone the repository only if you want to contribute or run the source tree directly:
 
 ```bash
 git clone https://github.com/MohdSaleh/tinyfish-guided-research-mcp.git
 cd tinyfish-guided-research-mcp
-```
-
-Install the dependencies:
-
-```bash
 uv sync --all-extras
-```
-
-Set your TinyFish API key:
-
-```bash
 export TINYFISH_API_KEY="your-api-key"
-```
-
-Then start the MCP server:
-
-```bash
-uv run tinyfish-research-mcp
+uv run tinyfish-guided-research-mcp
 ```
 
 ## Test it with MCP Inspector
@@ -125,7 +142,7 @@ You can inspect the available tools using the official MCP Inspector:
 
 ```bash
 npx @modelcontextprotocol/inspector \
-  --cli uv run tinyfish-research-mcp \
+  --cli uv run tinyfish-guided-research-mcp \
   --method tools/list
 ```
 
@@ -144,6 +161,36 @@ export DATABASE_URL="postgresql://user:password@host:5432/database?sslmode=requi
 ```
 
 PostgreSQL is recommended when more than one server instance may be running at the same time.
+
+## Distribution
+
+The project is designed for three distribution modes:
+
+1. **PyPI + uvx** — one-command local execution.
+2. **Official MCP Registry** — standardized discovery and package metadata.
+3. **Prefect Horizon** — hosted remote MCP endpoint with no local installation required by users.
+
+Release tags (`v*`) are configured to build and test the package, publish it to PyPI through OIDC Trusted Publishing, and then publish `server.json` to the MCP Registry through GitHub OIDC.
+
+## Prefect Horizon deployment
+
+For a hosted deployment in Horizon, connect this GitHub repository and use:
+
+```text
+Server path: src/tinyfish_research_mcp/server.py
+Requirements: pyproject.toml
+```
+
+Configure at least:
+
+```text
+TINYFISH_API_KEY=<secret>
+DATABASE_URL=postgresql://...
+```
+
+Use PostgreSQL for Horizon rather than the local SQLite fallback because hosted deployments may restart or scale across instances.
+
+Once Horizon assigns the remote MCP URL, it can be added to supported clients as an HTTP MCP server.
 
 ## Project structure
 
