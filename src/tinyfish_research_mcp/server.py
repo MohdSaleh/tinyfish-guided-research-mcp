@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from mcp.server import MCPServer
 
-from . import core
-from .observability import configure_observability
+from tinyfish_research_mcp import core
+from tinyfish_research_mcp.observability import configure_observability
 
 SERVER_INSTRUCTIONS = """
 TinyFish Guided Research MCP v7.2 - work-aware latency-first auditable protocol
