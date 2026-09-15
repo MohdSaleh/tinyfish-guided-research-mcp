@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --all-extras
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pyright
+      - run: uv run pytest
+      - run: uv run python evals/run_evals.py
+      - run: uv run pip-audit
+      - run: uv build
+      - name: MCP Inspector smoke test
+        run: npx -y @modelcontextprotocol/inspector --cli uv run tinyfish-research-mcp --method tools/list --format json
+        env:
+          TINYFISH_API_KEY: test-key-not-used-by-tools-list
