@@ -1,0 +1,200 @@
+        flags = a.metrics.get("quality_flags", [])
+        if a.status == "CONTESTED":
+            mode = "resolve_conflict"
+        elif "disconfirmation_attempt_required" in flags:
+            mode = "disconfirm"
+        else:
+            mode = "support"
+        open_details.append({
+            "claim_id": a.claim_id,
+            "claim_text": claim_map.get(a.claim_id, {}).get("text"),
+            "status": a.status,
+            "resolution_confidence": a.resolution_confidence,
+            "quality_flags": flags,
+            "suggested_mode": mode,
+        })
+
+    if not open_claims:
+        state["phase"] = "CLAIM_GRAPH_STABLE"
+        if state.get("contested"):
+            next_action = _next(
+                "review_claim_tensions", "All active claims are strongly resolved; contested session requires one tension review.",
+                ["Use only active claim IDs. An empty tension list is valid if there is no genuine tension."],
+                {"active_claims": [{"claim_id": c["claim_id"], "text": c["text"]} for c in _active_claims(state)]},
+            )
+        else:
+            next_action = _next(
+                "verify_citations", "Claim graph is stable; the server can auto-build and audit citation coverage.",
+                ["Call verify_citations with research_id only; citations are optional overrides."],
+            )
+        status = "CLAIM_GRAPH_STABLE"
+    else:
+        state["phase"] = "ASSESSED"
+        next_action = _next(
+            "research_unknowns",
+            "Only the unresolved/provisional/contested claims need more retrieval.",
+            [
+                "Generate compact targeted queries only for data.open_claims.",
+                "Do not research any claim listed in data.resolved.",
+                "Use suggested_mode exactly unless there is a concrete reason to override it.",
+            ],
+            {"open_claims": open_details},
+            "Every active claim is strongly resolved or the retrieval budget is exhausted.",
+        )
+        status = "MORE_RESEARCH_REQUIRED"
+
+    persist(state)
+    return ResearchToolResponse(
+        status=status,
+        data={
+            "assessments": [a.model_dump() for a in assessments],
+            "resolved": [a.claim_id for a in partition["resolved"]],
+            "open_claims": open_details,
+        },
+        next_action=next_action,
+        quality_gate={"claim_resolution": "PASS" if not open_claims else "BLOCKED"},
+        agent_rules=_agent_rules(),
+    )
+
+async def research_unknowns(research_id: str, gaps: list[GapPlan]) -> ResearchToolResponse:
+    """Run targeted retrieval only for claims that still need work, then return one compact review packet."""
+    state = load_state(research_id)
+    if state.get("phase") != "ASSESSED":
+        return _phase_violation(state, {"ASSESSED"}, "assess_claims")
+
+    assessment_map = {a.claim_id: a for a in [assess_one_claim(state, c) for c in _active_claims(state)]}
+    actionable = []
+    skipped = []
+    active_ids = {c["claim_id"] for c in _active_claims(state)}
+    for g in gaps:
+        if g.claim_id not in active_ids:
+            raise ValueError(f"Unknown or superseded claim_id {g.claim_id!r}")
+        current = assessment_map.get(g.claim_id)
+        if current and current.status in {"SUPPORTED", "CONTRADICTED"}:
+            skipped.append({"claim_id": g.claim_id, "reason": "already_strongly_resolved"})
+            continue
+        actionable.append(g)
+
+    state["metrics"]["early_stop_skips"] += len(skipped)
+    if not actionable:
+        unresolved_elsewhere = [
+            a for a in assessment_map.values() if a.status not in {"SUPPORTED", "CONTRADICTED"}
+        ]
+        if unresolved_elsewhere:
+            state["phase"] = "ASSESSED"
+            persist(state)
+            details = [{
+                "claim_id": a.claim_id,
+                "claim_text": _claim_by_id(state, a.claim_id)["text"],
+                "status": a.status,
+                "quality_flags": a.metrics.get("quality_flags", []),
+            } for a in unresolved_elsewhere]
+            return ResearchToolResponse(
+                status="NO_ACTIONABLE_GAPS_SUBMITTED",
+                data={"skipped": skipped, "still_open": details},
+                next_action=_next(
+                    "research_unknowns",
+                    "The submitted gaps were already resolved, but other active claims still need work.",
+                    ["Generate gap plans only for data.still_open."],
+                    {"still_open": details},
+                ),
+                agent_rules=_agent_rules(),
+            )
+        state["phase"] = "CLAIM_GRAPH_STABLE"
+        persist(state)
+        return ResearchToolResponse(
+            status="EARLY_STOP_ALL_REQUESTED_CLAIMS_RESOLVED",
+            data={"skipped": skipped},
+            next_action=_next(
+                "review_claim_tensions" if state.get("contested") else "verify_citations",
+                "All active claims already satisfy strong resolution gates.",
+                ["Do not perform more retrieval."],
+            ),
+            agent_rules=_agent_rules(),
+        )
+
+    budget = _budget_remaining(state)
+    if budget["search_requests"] <= 0 or budget["fetch_urls"] <= 0:
+        state["phase"] = "CLAIM_GRAPH_STABLE"
+        persist(state)
+        return ResearchToolResponse(
+            status="RETRIEVAL_BUDGET_EXHAUSTED",
+            data={"remaining_budget": budget, "open_claim_ids": [g.claim_id for g in actionable]},
+            next_action=_next(
+                "review_claim_tensions" if state.get("contested") else "verify_citations",
+                "The mode-level retrieval budget is exhausted; preserve unresolved claims explicitly.",
+                ["Do not bypass the global Search/Fetch budget."],
+            ),
+            agent_rules=_agent_rules(),
+        )
+
+    max_rounds = int(state.get("policy", {}).get("max_gap_rounds", 0))
+    if state.get("gap_rounds", 0) >= max_rounds or not _consume_followup_round(state, reason="research_unknowns"):
+        state["phase"] = "CLAIM_GRAPH_STABLE"
+        persist(state)
+        return ResearchToolResponse(
+            status="GAP_BUDGET_EXHAUSTED",
+            data={"skipped": skipped, "gap_rounds": state.get("gap_rounds", 0), "max_gap_rounds": max_rounds},
+            next_action=_next(
+                "review_claim_tensions" if state.get("contested") else "verify_citations",
+                "Gap budget is exhausted; unresolved claims are preserved as provisional/unknown.",
+                ["Proceed without inventing closure."],
+            ),
+            agent_rules=_agent_rules(),
+        )
+
+    policy = _mode_policy(state)
+    # Allocate the remaining global network budget across currently open claims
+    # before launching parallel work. This prevents a single gap round from
+    # overshooting FAST mode simply because many claims are unresolved at once.
+    max_claims_by_search = max(1, budget["search_requests"])
+    max_claims_by_fetch = max(1, budget["fetch_urls"])
+    max_actionable = min(len(actionable), max_claims_by_search, max_claims_by_fetch)
+    budget_deferred = actionable[max_actionable:]
+    actionable = actionable[:max_actionable]
+    per_gap_query_cap = max(1, min(int(policy["max_queries_per_gap"]), budget["search_requests"] // max(1, len(actionable))))
+    per_gap_fetch_cap = max(1, min(int(policy["max_fetch_per_retrieval"]), budget["fetch_urls"] // max(1, len(actionable))))
+
+    state["phase"] = "GAP_RESEARCH"
+    state["gap_rounds"] = int(state.get("gap_rounds", 0)) + 1
+    state["metrics"]["gap_rounds"] = state["gap_rounds"]
+
+    async def run(g: GapPlan):
+        claim = _claim_by_id(state, g.claim_id)
+        current = assessment_map.get(g.claim_id)
+        flags = set((current.metrics.get("quality_flags", []) if current else []))
+        prior_work_ids = set((current.metrics.get("winning_work_ids", []) if current else []))
+        independence_hint = ""
+        if "insufficient_independent_works" in flags and prior_work_ids:
+            independence_hint = f" | Independence requirement: find a DISTINCT underlying study/work, not another host or mirror of {sorted(prior_work_ids)}"
+        objective = f"Claim: {claim['text']} | Gap goal: {g.reason} | Mode: {g.mode}{independence_hint}"
+        spec = g.retrieval
+        if not spec.purpose:
+            spec.purpose = objective[:2000]
+        queries = g.queries[: per_gap_query_cap]
+        contexts, metrics = await _retrieve_candidates(
+            queries, spec, state["executed_queries_set"], objective,
+            fetch_top_n_per_query=policy["fetch_top_n_per_query"],
+            max_fetch_per_retrieval=per_gap_fetch_cap,
+        )
+        return g, objective, contexts, metrics
+
+    results = await asyncio.gather(*(run(g) for g in actionable), return_exceptions=True)
+    review_batches, errors, queue = [], [], []
+    for gap, result in zip(actionable, results):
+        if isinstance(result, Exception):
+            errors.append({"claim_id": gap.claim_id, "error": str(result)})
+            continue
+        g, objective, contexts, metrics = result
+        _apply_metrics(state, metrics, include_wave=False)
+        if g.mode in {"disconfirm", "resolve_conflict"}:
+            _claim_by_id(state, g.claim_id)["disconfirmation_attempted"] = True
+        ids = _register_candidates(state, contexts)
+        current_assessment = assessment_map.get(g.claim_id)
+        current_flags = set((current_assessment.metrics.get("quality_flags", []) if current_assessment else []))
+        excluded_works = set((current_assessment.metrics.get("winning_work_ids", []) if current_assessment else [])) if "insufficient_independent_works" in current_flags else set()
+        shortlist = _shortlist_for_review(
+            state, ids, objective, policy["gap_review_limit"], include_accepted=True,
+            exclude_work_ids=excluded_works,
+        )
+        # If every returned URL was merely another copy of an already-used work,
