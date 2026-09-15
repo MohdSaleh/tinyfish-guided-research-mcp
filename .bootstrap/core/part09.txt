@@ -1,0 +1,200 @@
+        state["phase"] = "ATOMICITY_REVIEW"
+        persist(state)
+        return _phase_violation(state, {"ATOMICITY_REVIEW"}, "split_claim")
+
+    active_map = {c["claim_id"]: c for c in _active_claims(state)}
+    accepted_ids = {sid for sid, src in state.get("sources", {}).items() if src.get("screen_status") == "ACCEPTED"}
+    accepted, rejected = [], []
+    evidence_source_ids: set[str] = set()
+    existing_keys = {
+        (e["claim_id"], e["source_id"], _normalize_quote(e.get("quote", "")))
+        for e in state.get("evidence", [])
+    }
+    for b in bindings:
+        if b.claim_id not in active_map:
+            rejected.append({"claim_id": b.claim_id, "source_id": b.source_id, "reason": "claim_not_active"})
+            continue
+        if b.source_id not in accepted_ids:
+            rejected.append({"claim_id": b.claim_id, "source_id": b.source_id, "reason": "source_not_accepted"})
+            continue
+        matched, match_type = _quote_match(_get_source_content(state, b.source_id), b.quote)
+        if not matched:
+            rejected.append({
+                "claim_id": b.claim_id, "source_id": b.source_id,
+                "reason": match_type, "quote": b.quote,
+            })
+            continue
+        key = (b.claim_id, b.source_id, _normalize_quote(b.quote))
+        if key in existing_keys:
+            existing = next(
+                e for e in state.get("evidence", [])
+                if (e["claim_id"], e["source_id"], _normalize_quote(e.get("quote", ""))) == key
+            )
+            accepted.append({
+                "evidence_id": existing["evidence_id"],
+                "claim_id": b.claim_id,
+                "source_id": b.source_id,
+                "already_bound": True,
+            })
+            evidence_source_ids.add(b.source_id)
+            continue
+        record = {
+            "evidence_id": f"ev_{uuid.uuid4().hex[:12]}",
+            "claim_id": b.claim_id,
+            "source_id": b.source_id,
+            "quote": b.quote,
+            "quote_verified": True,
+            "quote_match_type": match_type,
+            "relation": "UNJUDGED",
+            "strength": 0.0,
+            "created_at": time.time(),
+        }
+        state["evidence"].append(record)
+        existing_keys.add(key)
+        accepted.append({
+            "evidence_id": record["evidence_id"],
+            "claim_id": b.claim_id,
+            "source_id": b.source_id,
+            "already_bound": False,
+        })
+        evidence_source_ids.add(b.source_id)
+
+    if evidence_source_ids:
+        await asyncio.gather(*(_enrich_source(state["sources"][sid]) for sid in evidence_source_ids))
+
+    to_judge = []
+    accepted_eids = {x["evidence_id"] for x in accepted}
+    for ev in state.get("evidence", []):
+        if ev["evidence_id"] not in accepted_eids or ev.get("relation") != "UNJUDGED":
+            continue
+        claim = active_map.get(ev["claim_id"], {})
+        source = state.get("sources", {}).get(ev["source_id"], {})
+        to_judge.append({
+            "evidence_id": ev["evidence_id"],
+            "claim_id": ev["claim_id"],
+            "claim_text": claim.get("text"),
+            "source_id": ev["source_id"],
+            "source_title": source.get("title"),
+            "source_domain": source.get("domain"),
+            "quote": ev["quote"],
+        })
+
+    if to_judge:
+        state["phase"] = "EVIDENCE_BINDING"
+        next_action = _next(
+            "judge_evidence",
+            "Quote integrity passed; now make the bounded semantic entailment judgment.",
+            [
+                "Judge only whether the quoted passage entails/contradicts the claim.",
+                "Use RELATED_BUT_INSUFFICIENT when it is topical but does not establish the claim.",
+                "Do not infer facts beyond the quoted passage."
+            ],
+            {"evidence": to_judge, "judgments": "List[EvidenceRelationJudgment]"},
+            "Every newly bound evidence_id has a semantic relation judgment.",
+        )
+    else:
+        next_action = _next(
+            "bind_evidence",
+            "No new quote-verified evidence is ready for judgment.",
+            ["Use get_source_context to choose direct quotes, then bind them."],
+        )
+
+    persist(state)
+    return ResearchToolResponse(
+        status="EVIDENCE_QUOTES_VERIFIED" if accepted else "EVIDENCE_BINDING_FAILED",
+        data={"bound": accepted, "rejected": rejected, "evidence_to_judge": to_judge},
+        next_action=next_action,
+        quality_gate={"quote_integrity": "PASS" if accepted and not rejected else ("PARTIAL" if accepted else "BLOCKED")},
+        agent_rules=_agent_rules(),
+    )
+
+async def judge_evidence(research_id: str, judgments: list[EvidenceRelationJudgment]) -> ResearchToolResponse:
+    """Assign bounded semantic relation labels to quote-verified evidence.
+
+    The server owns evidence IDs and quote integrity. The client does exactly one
+    semantic task here: classify the relationship between the displayed quote
+    and its claim.
+    """
+    state = load_state(research_id)
+    if state.get("phase") != "EVIDENCE_BINDING":
+        return _phase_violation(state, {"EVIDENCE_BINDING"}, "judge_evidence")
+    evidence_map = {e["evidence_id"]: e for e in state.get("evidence", [])}
+    unknown = [j.evidence_id for j in judgments if j.evidence_id not in evidence_map]
+    if unknown:
+        raise ValueError(f"Unknown evidence IDs: {unknown}")
+
+    updated = []
+    for j in judgments:
+        ev = evidence_map[j.evidence_id]
+        if not ev.get("quote_verified"):
+            raise ValueError(f"Evidence {j.evidence_id} does not have a verified quote")
+        ev["relation"] = j.relation
+        ev["strength"] = j.strength
+        ev["judged_at"] = time.time()
+        updated.append({"evidence_id": j.evidence_id, "relation": j.relation, "strength": j.strength})
+
+    still_unjudged = [e["evidence_id"] for e in state.get("evidence", []) if e.get("relation") == "UNJUDGED"]
+    if still_unjudged:
+        next_action = _next(
+            "judge_evidence",
+            "Some bound evidence still lacks a semantic relation judgment.",
+            ["Judge the remaining evidence IDs before assessment."],
+            {"remaining_evidence_ids": still_unjudged},
+        )
+        status = "EVIDENCE_JUDGMENT_INCOMPLETE"
+    else:
+        state["phase"] = "ASSESSED"
+        next_action = _next(
+            "assess_claims",
+            "All bound evidence has semantic judgments; run deterministic aggregation.",
+            ["Do not self-assign claim confidence."],
+        )
+        status = "EVIDENCE_JUDGED"
+
+    persist(state)
+    return ResearchToolResponse(
+        status=status,
+        data={"updated": updated, "remaining_unjudged": still_unjudged},
+        next_action=next_action,
+        quality_gate={"entailment_judgment": "PASS" if not still_unjudged else "PENDING"},
+        agent_rules=_agent_rules(),
+    )
+
+async def assess_claims(research_id: str) -> ResearchToolResponse:
+    """Compute deterministic claim resolution and return a complete next-step packet."""
+    state = load_state(research_id)
+    if state.get("phase") not in {"ASSESSED", "EVIDENCE_BINDING"}:
+        return _phase_violation(state, {"ASSESSED", "EVIDENCE_BINDING"}, "assess_claims")
+    if state.get("phase") == "EVIDENCE_BINDING" and not state.get("evidence"):
+        review_batches = _prepare_candidate_review_queue(state, per_claim=4)
+        if state.get("candidate_review_queue"):
+            state["phase"] = "CANDIDATE_REVIEW"
+            persist(state)
+            return ResearchToolResponse(
+                status="INITIAL_CANDIDATE_REVIEW_REQUIRED",
+                data={"review_batches": review_batches},
+                next_action=_next(
+                    "review_candidates",
+                    "Claims need evidence; use the unified candidate review path.",
+                    ["Review the returned pairs directly; do not call get_research_state, bind_evidence, or judge_evidence."],
+                    {"review_batches": review_batches},
+                ),
+                agent_rules=_agent_rules(),
+            )
+        state["phase"] = "ASSESSED"
+        persist(state)
+        return ResearchToolResponse(
+            status="NO_INITIAL_EVIDENCE_CANDIDATES",
+            data={},
+            next_action=_next("assess_claims", "No initial candidate survived; reassess to generate targeted research gaps.", []),
+            agent_rules=_agent_rules(),
+        )
+
+    assessments = [assess_one_claim(state, c) for c in _active_claims(state)]
+    state["last_assessments"] = [a.model_dump() for a in assessments]
+    partition = _assessment_partition(assessments)
+    open_claims = partition["unknown"] + partition["provisional"] + partition["contested"]
+
+    claim_map = {c["claim_id"]: c for c in _active_claims(state)}
+    open_details = []
+    for a in open_claims:
