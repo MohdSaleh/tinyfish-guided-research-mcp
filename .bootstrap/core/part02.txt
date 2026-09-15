@@ -1,0 +1,200 @@
+        blocks = [re.sub(r"\s+", " ", text).strip()]
+    ranked = sorted(
+        blocks,
+        key=lambda p: (_token_overlap_score(objective, p), min(len(p), 1200)),
+        reverse=True,
+    )
+    return [p[:max_chars] for p in ranked[:limit]]
+
+def _authority_score(source: dict[str, Any]) -> float:
+    """Estimate evidentiary authority without confusing host with publication.
+
+    A GitHub/project copy of a peer-reviewed paper remains a project/repository
+    source. Venue metadata can raise confidence modestly, but host provenance is
+    always retained separately and peer review is never inferred as a fact.
+    """
+    domain = source.get("registered_domain") or _registrable_domain(source.get("domain", ""))
+    domain_type = source.get("domain_type", "web")
+    role = source.get("source_role") or _source_role(source)
+
+    role_base = {
+        "conference_repository": 0.86,
+        "publisher_or_venue_copy": 0.86,
+        "scholarly_copy": 0.76,
+        "preprint_repository": 0.72,
+        "paper_mirror": 0.62,
+        "publisher_web_page": 0.68,
+        "code_or_project_repository": 0.50,
+        "news_report": 0.68,
+        "web_source": 0.52,
+        "social_discussion": 0.24,
+    }
+    base = role_base.get(role, 0.52)
+
+    if domain_type == "research_paper":
+        base = max(base, 0.70)
+    if source.get("venue"):
+        base += 0.04
+    if source.get("publisher"):
+        base += 0.03
+    if source.get("pdf_url"):
+        base += 0.02
+    cited = source.get("cited_by_count") or 0
+    if isinstance(cited, (int, float)) and cited >= 20:
+        base += 0.03
+    if domain.endswith(".gov") or ".gov." in domain:
+        base = max(base, 0.90)
+    elif domain.endswith(".edu") or ".edu." in domain or domain.endswith(".ac.uk"):
+        base = max(base, 0.82)
+    if domain == "wikipedia.org" or domain.endswith(".wikipedia.org"):
+        base = min(base, 0.55)
+    if domain in SOCIAL_DOMAINS:
+        base = min(base, 0.25)
+    return round(min(1.0, max(0.0, base)), 4)
+
+def _mechanical_source_gate(source: dict[str, Any]) -> tuple[bool, float, list[str]]:
+    reasons: list[str] = []
+    text = source.get("content", "") or ""
+    final_url = source.get("final_url") or source.get("fetch_url") or source.get("url") or ""
+    lower_url = final_url.lower()
+    lower_text = text[:1200].lower()
+
+    if any(p in lower_url for p in SEARCH_INTERMEDIARY_PATTERNS):
+        return False, 0.0, ["search_intermediary_url"]
+    if not text.strip():
+        return False, 0.0, ["empty_content"]
+    if len(text.strip()) < 80:
+        reasons.append("very_short_content")
+    if _is_root_url(final_url) and any(sig in lower_text for sig in GENERIC_HOME_SIGNALS):
+        return False, 0.0, ["generic_homepage"]
+    if source.get("fetch_failed") and len(text) < 120:
+        return False, 0.0, ["fetch_failed_without_usable_snippet"]
+
+    objective = source.get("retrieval_objective", "")
+    query_text = " ".join(source.get("matched_queries", []))
+    candidate_text = " ".join(
+        filter(None, [source.get("title"), source.get("description"), text[:5000]])
+    )
+    relevance = max(
+        _token_overlap_score(objective, candidate_text),
+        _token_overlap_score(query_text, candidate_text),
+    )
+    if relevance < 0.08:
+        reasons.append("low_lexical_relevance")
+
+    full_fetch = 0.0 if source.get("fetch_failed") else 1.0
+    length_factor = min(1.0, len(text) / 1800.0)
+    authority = _authority_score(source)
+    score = 0.38 * relevance + 0.22 * full_fetch + 0.18 * length_factor + 0.22 * authority
+
+    if relevance < 0.025 and source.get("domain_type") != "research_paper":
+        return False, round(score, 4), reasons + ["mechanically_off_topic"]
+    return score >= SOURCE_MECHANICAL_ACCEPT_THRESHOLD, round(score, 4), reasons
+
+async def _retrieve_candidates(
+    queries: list[str],
+    spec: RetrievalSpec,
+    executed_queries_set: set[str],
+    objective: str,
+    *,
+    fetch_top_n_per_query: Optional[int] = None,
+    max_fetch_per_retrieval: Optional[int] = None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Search concurrently, fuse rankings, fetch only the strongest candidates.
+
+    The caller passes profile-specific retrieval limits. This keeps FAST mode
+    genuinely fast without weakening downstream evidence-quality gates.
+    """
+    query_pairs: list[tuple[str, str]] = []
+    for q in queries:
+        q = q.strip()
+        if not q:
+            continue
+        key = json.dumps({"q": q, "spec": spec.model_dump()}, sort_keys=True)
+        if key in executed_queries_set:
+            continue
+        executed_queries_set.add(key)
+        query_pairs.append((key, q))
+
+    search_results = await asyncio.gather(
+        *(_do_search(q, spec) for _, q in query_pairs), return_exceptions=True
+    ) if query_pairs else []
+
+    per_query: dict[str, list[dict[str, Any]]] = {}
+    search_requests = 0
+    for (_, q), result in zip(query_pairs, search_results):
+        search_requests += 1
+        per_query[q] = [] if isinstance(result, Exception) else result
+
+    aggregated: dict[str, dict[str, Any]] = {}
+    for q, results in per_query.items():
+        for r in results:
+            fetch_url = r.get("pdf_url") or r.get("url")
+            if not fetch_url:
+                continue
+            canonical = _canonicalize_url(fetch_url)
+            rec = aggregated.setdefault(
+                canonical,
+                {
+                    **r,
+                    "fetch_url": fetch_url,
+                    "landing_url": r.get("url"),
+                    "matched_queries": [],
+                    "rrf_score": 0.0,
+                },
+            )
+            if q not in rec["matched_queries"]:
+                rec["matched_queries"].append(q)
+            pos = r.get("position") or 100
+            rec["rrf_score"] += 1.0 / (RRF_K + max(1, pos))
+            if r.get("pdf_url"):
+                rec["rrf_score"] += 0.004
+            cited = r.get("cited_by_count") or 0
+            if spec.domain_type == "research_paper" and isinstance(cited, (int, float)):
+                rec["rrf_score"] += min(0.004, math.log1p(max(cited, 0)) / 2000.0)
+
+    ranked = sorted(aggregated.values(), key=lambda x: x["rrf_score"], reverse=True)
+    top_n = fetch_top_n_per_query or FETCH_TOP_N_PER_QUERY
+    max_fetch = max_fetch_per_retrieval or MAX_FETCH_PER_RETRIEVAL
+    fetch_budget = min(max_fetch, max(1, len(query_pairs)) * top_n)
+    selected = ranked[:fetch_budget]
+    fetched, fetch_batches = await _fetch_many(
+        [r["fetch_url"] for r in selected], spec.purpose or objective
+    )
+
+    contexts: list[dict[str, Any]] = []
+    for meta in selected:
+        f = fetched.get(meta["fetch_url"], {})
+        content = f.get("content") or meta.get("snippet") or ""
+        contexts.append(
+            {
+                **meta,
+                **f,
+                "content": content,
+                "content_origin": "search_snippet" if f.get("fetch_failed") else "fetch",
+                "domain": _domain_of(f.get("final_url") or meta.get("fetch_url") or ""),
+                "registered_domain": _registrable_domain(_domain_of(f.get("final_url") or meta.get("fetch_url") or "")),
+                "retrieval_objective": objective,
+            }
+        )
+    return contexts, {
+        "search_requests": search_requests,
+        "fetch_urls": len(selected),
+        "fetch_batches": fetch_batches,
+        "retrieval_waves": 1 if query_pairs else 0,
+    }
+
+async def _enrich_source(source: dict[str, Any]) -> None:
+    """Run expensive reliability checks only once, preferably on evidence-used sources."""
+    if source.get("reliability_enriched"):
+        return
+    r, a = await asyncio.gather(
+        _check_retraction(source.get("doi") or source.get("final_url")),
+        _check_author(source.get("author")),
+    )
+    source["retraction_check"] = r
+    source["author_track_record"] = a
+    source["authority_score"] = round(_authority_score(source) * _reliability_penalty(source), 4)
+    source["reliability_enriched"] = True
+
+def _merge_retrieval_context(existing: dict[str, Any], ctx: dict[str, Any]) -> None:
