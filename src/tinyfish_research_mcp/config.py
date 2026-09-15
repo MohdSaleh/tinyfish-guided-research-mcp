@@ -9,6 +9,9 @@ from typing import Any
 PROTOCOL_VERSION = "7.2"
 PACKAGE_VERSION = "1.0.0"
 
+# Persistence: DATABASE_URL enables shared PostgreSQL for multi-replica production
+# deployments. SQLite remains the zero-config local/development fallback.
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 DB_PATH = os.environ.get("RESEARCH_DB_PATH", "research_state.db")
 TINYFISH_API_KEY = os.environ.get("TINYFISH_API_KEY", "")
 TINYFISH_SEARCH_URL = os.environ.get("TINYFISH_SEARCH_URL", "https://api.search.tinyfish.ai")
