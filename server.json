@@ -23,8 +23,15 @@
           "format": "string"
         },
         {
+          "name": "DATABASE_URL",
+          "description": "Shared PostgreSQL connection URL for durable production state. Recommended for remote/multi-replica hosting.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
           "name": "RESEARCH_DB_PATH",
-          "description": "SQLite persistence path. Defaults to research_state.db.",
+          "description": "SQLite persistence path used when DATABASE_URL is unset. Intended for local/single-instance usage.",
           "isRequired": false,
           "isSecret": false,
           "format": "string"
