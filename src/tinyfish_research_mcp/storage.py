@@ -95,9 +95,7 @@ def _get_postgres() -> Any:
             "research_id TEXT PRIMARY KEY, state_json TEXT NOT NULL, "
             "updated_at DOUBLE PRECISION NOT NULL, version BIGINT NOT NULL DEFAULT 1)"
         )
-        cur.execute(
-            "ALTER TABLE research_state ADD COLUMN IF NOT EXISTS version BIGINT NOT NULL DEFAULT 1"
-        )
+        cur.execute("ALTER TABLE research_state ADD COLUMN IF NOT EXISTS version BIGINT NOT NULL DEFAULT 1")
         cur.execute(
             "CREATE TABLE IF NOT EXISTS source_content ("
             "research_id TEXT NOT NULL, source_id TEXT NOT NULL, content TEXT NOT NULL, "
