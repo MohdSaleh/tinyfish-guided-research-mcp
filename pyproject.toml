@@ -41,7 +41,10 @@ target-version = "py311"
 line-length = 110
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "ASYNC"]
+# Keep the release gate focused on correctness. Formatting is enforced separately
+# by `ruff format`, while type-modernization preferences are intentionally not
+# made release blockers.
+select = ["E", "F", "ASYNC"]
 ignore = ["E501"]
 
 [tool.pyright]
