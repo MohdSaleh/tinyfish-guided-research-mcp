@@ -1,7 +1,6 @@
 import pytest
-
-mcp_module = pytest.importorskip("mcp")
 from mcp import Client
+
 from tinyfish_research_mcp.server import mcp
 
 
