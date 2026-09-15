@@ -2,107 +2,80 @@
 
 <!-- mcp-name: io.github.MohdSaleh/tinyfish-guided-research -->
 
-A simple research workflow for AI agents using TinyFish Search and Fetch.
+An MCP server that adds a simple research workflow on top of TinyFish Search and Fetch.
 
-TinyFish provides free web search and page fetching APIs. They are useful on their own, but getting consistently good research results can be difficult — especially when the agent is powered by a small or medium-sized model.
+The client model does the reasoning. The server keeps track of the research run, handles the search and fetch flow, stores the state, checks evidence and citations, and tells the client what should happen next.
 
-The main problem usually isn't search itself.
-
-It's deciding:
-
-- what to search for
-- which results are worth opening
-- what information matters
-- when more research is needed
-- which sources actually support a claim
-- when the research is good enough to stop
-
-This MCP adds a structured research workflow on top of TinyFish so the AI model doesn't have to figure out that entire process by itself.
-
-## Why I built this
-
-TinyFish offers Search and Fetch APIs that can be used freely, while its more advanced research services are paid.
-
-I wanted to see how far the free APIs could go with a better workflow around them.
-
-Instead of asking the AI model to manage the whole research process, this MCP handles the repeatable parts for it.
-
-The model still reads, reasons, and makes decisions.
-
-The MCP handles the workflow around those decisions.
-
-The result is a more reliable way for agents — especially smaller models — to search the web, collect useful information, and build answers from real sources.
+There is no LLM running inside the server.
 
 ## How it works
 
-The basic flow looks like this:
+A research run usually follows this flow:
 
 ```text
-Question
-   ↓
-Plan what needs to be researched
-   ↓
-Search with TinyFish
-   ↓
-Filter weak or duplicate results
-   ↓
-Fetch useful pages
-   ↓
-Extract evidence
-   ↓
-Check whether the evidence supports the claim
-   ↓
-Search again if something is missing
-   ↓
+Research request
+      ↓
+Plan
+      ↓
+Search
+      ↓
+Review sources
+      ↓
+Fetch useful content
+      ↓
+Track claims and evidence
+      ↓
+Check what is supported or still missing
+      ↓
+Research the gaps
+      ↓
 Verify citations
-   ↓
-Finish
+      ↓
+Finalize
 ```
 
-There is **no LLM running inside the MCP server**.
+Search results are treated as candidates first, not as evidence by default.
 
-Your client model does the language reasoning.
+The server also keeps duplicate sources from being counted more than once. This includes cases where the same paper or source appears through different URLs or mirrors.
 
-The MCP manages the research process, keeps track of the state, and makes sure important steps are not skipped.
+Quotes are checked against the fetched source content, while semantic decisions such as whether a passage actually supports a claim are left to the client model.
 
-## What it helps with
+Conflicting evidence is kept in the research state instead of being ignored, and citations are checked before the research is finalized.
 
-- Breaking a research task into smaller parts
-- Running focused TinyFish searches
-- Filtering weak and duplicate sources
-- Fetching the most useful pages
-- Keeping research state between steps
-- Connecting evidence to claims
-- Finding gaps that need more research
-- Checking quotes against fetched source content
-- Tracking conflicting evidence
-- Verifying citations before the research is finished
-- Preventing weak evidence from being treated as strong proof
+## What it handles
 
-The goal is not to make the model smarter.
+- Research state across multiple steps
+- TinyFish Search and Fetch calls
+- Source screening and duplicate handling
+- Claim and evidence tracking
+- Quote checks against fetched content
+- Conflicting evidence
+- Research gaps and follow-up searches
+- Citation verification
+- Research budgets and stopping conditions
+- SQLite and PostgreSQL persistence
 
-The goal is to give it a better process.
+## Quick start
 
-## Requirements
+### Hosted
 
-- Python 3.11+
-- A TinyFish API key
-- `uv` for the recommended local one-command setup
-- PostgreSQL for remote or multi-instance deployments
+The hosted MCP endpoint is:
 
-SQLite works fine for local development.
+```text
+https://tinyfish-guided-research-mcp.fastmcp.app/mcp
+```
 
-## Quick install
+Use it as a Streamable HTTP MCP server.
 
-After the package is published to PyPI, no Git clone or virtual-environment setup is required.
+### Local
+
+Requires Python 3.11+ and a TinyFish API key.
 
 ```bash
 TINYFISH_API_KEY="your-api-key" uvx tinyfish-guided-research-mcp
 ```
 
-`uvx` creates an isolated environment, installs the package and dependencies, and starts the MCP server.
-
-A typical MCP client configuration is:
+Example MCP client config:
 
 ```json
 {
@@ -118,27 +91,81 @@ A typical MCP client configuration is:
 }
 ```
 
-The shorter compatibility command remains available as well:
+The compatibility entrypoint is also available:
 
 ```bash
 uvx --from tinyfish-guided-research-mcp tinyfish-research-mcp
 ```
 
-## Development install
+## Storage
 
-Clone the repository only if you want to contribute or run the source tree directly:
+SQLite is fine for local or single-instance use:
+
+```bash
+export RESEARCH_DB_PATH="research_state.db"
+```
+
+For hosted or multi-instance deployments, use PostgreSQL:
+
+```bash
+export DATABASE_URL="postgresql://user:password@host:5432/database?sslmode=require"
+```
+
+PostgreSQL is the better option when more than one server instance can access the same research state.
+
+## Distribution
+
+The server is available through PyPI, the official MCP Registry, and the hosted Horizon endpoint.
+
+PyPI:
+
+```text
+tinyfish-guided-research-mcp
+```
+
+MCP Registry:
+
+```text
+io.github.MohdSaleh/tinyfish-guided-research
+```
+
+Hosted MCP:
+
+```text
+https://tinyfish-guided-research-mcp.fastmcp.app/mcp
+```
+
+## Development
+
+Clone the repo and install the dependencies:
 
 ```bash
 git clone https://github.com/MohdSaleh/tinyfish-guided-research-mcp.git
 cd tinyfish-guided-research-mcp
 uv sync --all-extras
-export TINYFISH_API_KEY="your-api-key"
-uv run tinyfish-guided-research-mcp
 ```
 
-## Test it with MCP Inspector
+Run it locally:
 
-You can inspect the available tools using the official MCP Inspector:
+```bash
+TINYFISH_API_KEY="your-api-key" uv run tinyfish-guided-research-mcp
+```
+
+Run the checks:
+
+```bash
+uv run ruff check .
+uv run ruff format --check .
+uv run pyright
+uv run pytest
+uv run python evals/run_evals.py
+uv run pip-audit
+uv build
+```
+
+The regular tests cover the implementation and storage layer. The research evals cover cases such as duplicate sources, weak evidence, quote mismatches, superseded claims, and citation coverage.
+
+You can also inspect the MCP tools with:
 
 ```bash
 npx @modelcontextprotocol/inspector \
@@ -146,148 +173,26 @@ npx @modelcontextprotocol/inspector \
   --method tools/list
 ```
 
-## Storage
+## Deploying on Horizon
 
-For local development, the MCP uses SQLite.
-
-```bash
-export RESEARCH_DB_PATH=research_state.db
-```
-
-For a hosted deployment, use PostgreSQL:
-
-```bash
-export DATABASE_URL="postgresql://user:password@host:5432/database?sslmode=require"
-```
-
-PostgreSQL is recommended when more than one server instance may be running at the same time.
-
-## Distribution
-
-The project is designed for three distribution modes:
-
-1. **PyPI + uvx** — one-command local execution.
-2. **Official MCP Registry** — standardized discovery and package metadata.
-3. **Prefect Horizon** — hosted remote MCP endpoint with no local installation required by users.
-
-Release tags (`v*`) are configured to build and test the package, publish it to PyPI through OIDC Trusted Publishing, and then publish `server.json` to the MCP Registry through GitHub OIDC.
-
-## Prefect Horizon deployment
-
-For a hosted deployment in Horizon, connect this GitHub repository and use:
+If you want to deploy your own instance with Prefect Horizon, use:
 
 ```text
-Entrypoint: src/tinyfish_research_mcp/server.py:mcp
-Requirements: pyproject.toml
+Entrypoint:
+src/tinyfish_research_mcp/server.py:mcp
+
+Dependencies:
+pyproject.toml
 ```
 
-Configure at least:
+Set:
 
 ```text
-TINYFISH_API_KEY=<secret>
-DATABASE_URL=postgresql://...
+TINYFISH_API_KEY
+DATABASE_URL
 ```
 
-Use PostgreSQL for Horizon rather than the local SQLite fallback because hosted deployments may restart or scale across instances.
-
-Once Horizon assigns the remote MCP URL, it can be added to supported clients as an HTTP MCP server.
-
-## Project structure
-
-```text
-src/tinyfish_research_mcp/
-
-  server.py
-  MCP server and tool definitions
-
-  core.py
-  Research workflow and quality checks
-
-  providers.py
-  TinyFish and external data providers
-
-  storage.py
-  Research state and source storage
-
-  models.py
-  Tool input/output models
-
-  config.py
-  Configuration
-
-  observability.py
-  Logging and tracing
-```
-
-There are also two important directories:
-
-```text
-tests/
-```
-
-Tests the MCP implementation.
-
-```text
-evals/
-```
-
-Tests research-quality behavior such as citation coverage, duplicate sources, weak evidence, and quote verification.
-
-## Development
-
-Run the main checks with:
-
-```bash
-uv run ruff check .
-uv run pyright
-uv run pytest
-uv run python evals/run_evals.py
-```
-
-Security check:
-
-```bash
-uv run pip-audit
-```
-
-Build the package:
-
-```bash
-uv build
-```
-
-## Design idea
-
-This project follows one simple rule:
-
-> Let the model do the reasoning. Let the MCP manage the research process.
-
-Smaller models can often understand a source perfectly well once the right information is in front of them.
-
-What they struggle with more is managing a long research process consistently.
-
-This MCP tries to solve that part.
-
-TinyFish handles search and page fetching.
-
-The AI model handles understanding and reasoning.
-
-The MCP sits between them and keeps the research moving through a predictable workflow.
-
-## Status
-
-The project is still evolving.
-
-The current focus is improving:
-
-- research quality
-- source selection
-- citation accuracy
-- smaller-model performance
-- search efficiency
-- fewer unnecessary tool calls
-
-Feedback, issues, and experiments are welcome.
+Use PostgreSQL for hosted deployments instead of the local SQLite fallback.
 
 ## License
 
