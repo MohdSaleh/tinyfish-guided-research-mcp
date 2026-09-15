@@ -287,9 +287,10 @@ def _work_aliases(source: dict[str, Any]) -> list[tuple[str, str]]:
     if openalex_id:
         aliases.append(("openalex", openalex_id.lower().rsplit("/", 1)[-1]))
     title = _normalize_title_key(source.get("title"))
-    authors = _normalize_author_key(
-        source.get("authors") or ([source.get("author")] if source.get("author") else [])
-    )
+    raw_authors = source.get("authors")
+    if not isinstance(raw_authors, list):
+        raw_authors = [source.get("author")] if source.get("author") else []
+    authors = _normalize_author_key([str(author) for author in raw_authors if author is not None])
     if len(title) >= 24 and len(title.split()) >= 4:
         if authors:
             aliases.append(("title_authors", f"{title}|{authors}"))
@@ -654,7 +655,10 @@ async def _retrieve_candidates(
     search_requests = 0
     for (_, q), result in zip(query_pairs, search_results):
         search_requests += 1
-        per_query[q] = [] if isinstance(result, Exception) else result
+        if isinstance(result, BaseException):
+            per_query[q] = []
+        else:
+            per_query[q] = result
 
     aggregated: dict[str, dict[str, Any]] = {}
     for q, results in per_query.items():
@@ -1118,7 +1122,7 @@ def _temporal_weight(claim: dict[str, Any], source: dict[str, Any]) -> float:
 
 
 def _source_screen_relevance(source: dict[str, Any]) -> float:
-    verdict = source.get("client_screen_verdict")
+    verdict = str(source.get("client_screen_verdict") or "")
     return {"RELEVANT": 1.0, "PARTIAL": 0.60}.get(verdict, 0.0)
 
 
@@ -1599,7 +1603,7 @@ async def dispatch_parallel_subagents(
     findings, errors = [], []
     review_queue = []
     for task, result in zip(tasks, raw):
-        if isinstance(result, Exception):
+        if isinstance(result, BaseException):
             errors.append({"subagent_id": task.subagent_id, "error": str(result)})
             continue
         actual_task, contexts, metrics = result
@@ -2573,7 +2577,7 @@ async def research_unknowns(research_id: str, gaps: list[GapPlan]) -> ResearchTo
     results = await asyncio.gather(*(run(g) for g in actionable), return_exceptions=True)
     review_batches, errors, queue = [], [], []
     for gap, result in zip(actionable, results):
-        if isinstance(result, Exception):
+        if isinstance(result, BaseException):
             errors.append({"claim_id": gap.claim_id, "error": str(result)})
             continue
         g, objective, contexts, metrics = result
