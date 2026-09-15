@@ -3,6 +3,7 @@ name: Update uv Lockfile
 on:
   push:
     paths:
+      - "pyproject.toml"
       - ".github/workflows/update-lock.yml"
   workflow_dispatch:
 
