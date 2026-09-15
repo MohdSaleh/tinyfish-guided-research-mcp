@@ -177,7 +177,7 @@ Release tags (`v*`) are configured to build and test the package, publish it to 
 For a hosted deployment in Horizon, connect this GitHub repository and use:
 
 ```text
-Server path: src/tinyfish_research_mcp/server.py
+Entrypoint: src/tinyfish_research_mcp/server.py:mcp
 Requirements: pyproject.toml
 ```
 
