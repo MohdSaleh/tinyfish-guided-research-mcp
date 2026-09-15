@@ -32,6 +32,7 @@ dev = [
 ]
 
 [project.scripts]
+tinyfish-guided-research-mcp = "tinyfish_research_mcp.server:main"
 tinyfish-research-mcp = "tinyfish_research_mcp.server:main"
 
 [tool.hatch.build.targets.wheel]
