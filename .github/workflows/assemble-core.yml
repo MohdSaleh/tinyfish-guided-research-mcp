@@ -1,0 +1,33 @@
+name: Assemble Core Bootstrap
+
+on:
+  push:
+    paths:
+      - ".github/workflows/assemble-core.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assemble and verify research core
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .bootstrap/core/part*.txt > src/tinyfish_research_mcp/core.py
+          echo "b5d7c507990b6fb97185778c0a246f301930fe4a0dd3ff56c863e40e57d8d830  src/tinyfish_research_mcp/core.py" | sha256sum -c -
+          python -m py_compile src/tinyfish_research_mcp/core.py
+      - name: Commit assembled source and remove bootstrap files
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .bootstrap
+          rm .github/workflows/assemble-core.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "feat: add research protocol core engine"
+          git push
