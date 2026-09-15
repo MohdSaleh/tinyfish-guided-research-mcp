@@ -1,0 +1,200 @@
+    if warnings:
+        state["phase"] = "ATOMICITY_REVIEW"
+        next_action = _next(
+            "split_claim",
+            "Some claims failed the atomicity gate.",
+            [
+                "For each warned claim either call split_claim with atomic child claims,",
+                "or call override_atomicity with a concrete reason it cannot be split further.",
+            ],
+            {"warned_claim_ids": list(warnings)},
+            "No active claim remains in REVIEW_REQUIRED atomicity state.",
+        )
+        status = "ATOMICITY_REVIEW_REQUIRED"
+    else:
+        evidence_candidates = _prepare_candidate_review_queue(state, list(mapping.values()), per_claim=4)
+        if state.get("candidate_review_queue"):
+            state["phase"] = "CANDIDATE_REVIEW"
+            next_action = _next(
+                "review_candidates",
+                "Claims passed atomicity; review the best distinct-work evidence candidates in one bounded call.",
+                [
+                    "For each returned claim/source pair choose RELEVANT/PARTIAL/IRRELEVANT.",
+                    "If useful, copy one direct quote from passages and assign SUPPORTS/CONTRADICTS/RELATED_BUT_INSUFFICIENT/IRRELEVANT.",
+                    "Do not call get_research_state, bind_evidence, or judge_evidence on the normal path.",
+                ],
+                {"review_batches": evidence_candidates},
+                "All returned pairs are reviewed once.",
+            )
+            status = "CLAIMS_REGISTERED_REVIEW_REQUIRED"
+        else:
+            state["phase"] = "ASSESSED"
+            next_action = _next("assess_claims", "No accepted source is a viable initial evidence candidate.", ["Assess now; UNKNOWN claims will receive targeted gap-research instructions."])
+            status = "CLAIMS_REGISTERED_NO_INITIAL_EVIDENCE"
+
+    persist(state)
+    return ResearchToolResponse(
+        status=status,
+        data={"claim_ids": mapping, "atomicity_warnings": warnings, "active_claim_count": len(_active_claims(state)), "evidence_candidates": evidence_candidates if not warnings else []},
+        next_action=next_action,
+        quality_gate={"atomicity": "PASS" if not warnings else "BLOCKED"},
+        agent_rules=_agent_rules(),
+    )
+
+async def split_claim(research_id: str, parent_claim_id: str, children: list[ClaimDraft]) -> ResearchToolResponse:
+    """Split a compound claim. The parent is superseded automatically."""
+    state = load_state(research_id)
+    if state.get("phase") != "ATOMICITY_REVIEW":
+        return _phase_violation(state, {"ATOMICITY_REVIEW"}, "split_claim")
+    parent = _claim_by_id(state, parent_claim_id)
+    if parent_claim_id in set(state.get("superseded_claim_ids", [])):
+        raise ValueError("Cannot split an already-superseded claim")
+    depth = int(parent.get("split_depth", 0)) + 1
+    mapping: dict[str, str] = {}
+    warnings: dict[str, str] = {}
+    new_ids = []
+    for child in children:
+        cid = f"claim_{uuid.uuid4().hex[:12]}"
+        warning = None if child.atomicity_override else _atomicity_warning(child.text, depth)
+        state["claims"].append({
+            "claim_id": cid,
+            "client_ref": child.client_ref,
+            "text": child.text,
+            "entity": child.entity or parent.get("entity"),
+            "temporal_mode": child.temporal_mode.value,
+            "split_depth": depth,
+            "parent_claim_id": parent_claim_id,
+            "atomicity_status": "OVERRIDDEN" if child.atomicity_override else ("REVIEW_REQUIRED" if warning else "PASS"),
+            "atomicity_override_reason": child.atomicity_override_reason,
+            "created_at": time.time(),
+            "disconfirmation_attempted": False,
+        })
+        mapping[child.client_ref] = cid
+        new_ids.append(cid)
+        if warning:
+            warnings[cid] = warning
+    state.setdefault("superseded_claim_ids", [])
+    state["superseded_claim_ids"] = sorted(set(state["superseded_claim_ids"]) | {parent_claim_id})
+
+    if _all_atomicity_resolved(state):
+        review_batches = _prepare_candidate_review_queue(state, new_ids, per_claim=4)
+        if state.get("candidate_review_queue"):
+            state["phase"] = "CANDIDATE_REVIEW"
+            next_action = _next("review_candidates", "All active claims passed atomicity; review evidence for the new child claims.", ["Use only returned review_batches."], {"review_batches": review_batches})
+            status = "CLAIM_SPLIT_REVIEW_REQUIRED"
+        else:
+            state["phase"] = "ASSESSED"
+            next_action = _next("assess_claims", "All active claims passed atomicity but no initial evidence candidate survived.", ["Assess to generate targeted gaps."])
+            status = "CLAIM_SPLIT_ATOMICITY_PASS_NO_EVIDENCE"
+    else:
+        next_action = _next(
+            "split_claim", "Additional active claims still require atomicity review.",
+            ["Continue splitting or use override_atomicity on remaining warned claims."],
+        )
+        status = "CLAIM_SPLIT_REVIEW_REMAINS"
+    persist(state)
+    return ResearchToolResponse(
+        status=status,
+        data={"parent_superseded": parent_claim_id, "child_claim_ids": mapping, "atomicity_warnings": warnings},
+        next_action=next_action,
+        quality_gate={"atomicity": "PASS" if _all_atomicity_resolved(state) else "BLOCKED"},
+        agent_rules=_agent_rules(),
+    )
+
+async def override_atomicity(research_id: str, claim_id: str, reason: str) -> ResearchToolResponse:
+    """Explicitly override an atomicity warning for a maximally atomic claim."""
+    state = load_state(research_id)
+    if state.get("phase") != "ATOMICITY_REVIEW":
+        return _phase_violation(state, {"ATOMICITY_REVIEW"}, "override_atomicity")
+    claim = _claim_by_id(state, claim_id)
+    if claim_id in set(state.get("superseded_claim_ids", [])):
+        raise ValueError("Cannot override a superseded claim")
+    if len(reason.strip()) < 12:
+        raise ValueError("Provide a concrete atomicity override reason")
+    claim["atomicity_status"] = "OVERRIDDEN"
+    claim["atomicity_override_reason"] = reason.strip()
+    if _all_atomicity_resolved(state):
+        judged_claims = {e.get("claim_id") for e in state.get("evidence", []) if e.get("relation") not in {None, "UNJUDGED"}}
+        need_review = [c["claim_id"] for c in _active_claims(state) if c["claim_id"] not in judged_claims]
+        review_batches = _prepare_candidate_review_queue(state, need_review, per_claim=4) if need_review else []
+        if state.get("candidate_review_queue"):
+            state["phase"] = "CANDIDATE_REVIEW"
+            next_action = _next("review_candidates", "All active claims passed atomicity; review evidence for claims that still lack judged evidence.", ["Use only returned review_batches."], {"review_batches": review_batches})
+            status = "ATOMICITY_PASS_REVIEW_REQUIRED"
+        else:
+            state["phase"] = "ASSESSED"
+            next_action = _next("assess_claims", "All active claims passed atomicity.", ["Assess current evidence and let the server route remaining gaps."])
+            status = "ATOMICITY_PASS"
+    else:
+        next_action = _next("split_claim", "Other active claims still require atomicity review.", ["Resolve every remaining warning."])
+        status = "ATOMICITY_REVIEW_REMAINS"
+    persist(state)
+    return ResearchToolResponse(
+        status=status,
+        data={"claim_id": claim_id, "remaining_warned": [c["claim_id"] for c in _active_claims(state) if c.get("atomicity_status") == "REVIEW_REQUIRED"]},
+        next_action=next_action,
+        agent_rules=_agent_rules(),
+    )
+
+async def revise_claim(research_id: str, claim_id: str, replacement: ClaimDraft) -> ResearchToolResponse:
+    """Replace an incorrect/overbroad active claim without leaving the parent unresolved.
+
+    The old claim is superseded automatically. Use this for semantic revision;
+    use split_claim when one claim must become multiple children.
+    """
+    state = load_state(research_id)
+    if state.get("phase") not in {"EVIDENCE_BINDING", "ASSESSED", "ATOMICITY_REVIEW"}:
+        return _phase_violation(state, {"EVIDENCE_BINDING", "ASSESSED"}, "revise_claim")
+    parent = _claim_by_id(state, claim_id)
+    new_id = f"claim_{uuid.uuid4().hex[:12]}"
+    depth = int(parent.get("split_depth", 0))
+    warning = None if replacement.atomicity_override else _atomicity_warning(replacement.text, depth)
+    state["claims"].append({
+        "claim_id": new_id,
+        "client_ref": replacement.client_ref,
+        "text": replacement.text,
+        "entity": replacement.entity or parent.get("entity"),
+        "temporal_mode": replacement.temporal_mode.value,
+        "split_depth": depth,
+        "revises_claim_id": claim_id,
+        "atomicity_status": "OVERRIDDEN" if replacement.atomicity_override else ("REVIEW_REQUIRED" if warning else "PASS"),
+        "atomicity_override_reason": replacement.atomicity_override_reason,
+        "created_at": time.time(),
+        "disconfirmation_attempted": False,
+    })
+    state.setdefault("superseded_claim_ids", [])
+    state["superseded_claim_ids"] = sorted(set(state["superseded_claim_ids"]) | {claim_id})
+    if warning:
+        state["phase"] = "ATOMICITY_REVIEW"
+        next_action = _next("split_claim", "Replacement claim still fails atomicity.", ["Split it or override with a reason."])
+        status = "CLAIM_REVISED_ATOMICITY_REVIEW_REQUIRED"
+    else:
+        review_batches = _prepare_candidate_review_queue(state, [new_id], per_claim=4)
+        if state.get("candidate_review_queue"):
+            state["phase"] = "CANDIDATE_REVIEW"
+            next_action = _next("review_candidates", "Replacement claim is active; review likely evidence in one bounded call.", ["Use only the replacement claim_id and returned review_batches."], {"review_batches": review_batches})
+            status = "CLAIM_REVISED_REVIEW_REQUIRED"
+        else:
+            state["phase"] = "ASSESSED"
+            next_action = _next("assess_claims", "Replacement claim is active but no initial evidence candidate survived.", ["Assess to generate a targeted gap plan."])
+            status = "CLAIM_REVISED_NO_INITIAL_EVIDENCE"
+    persist(state)
+    return ResearchToolResponse(
+        status=status,
+        data={"superseded_claim_id": claim_id, "replacement_claim_id": new_id, "atomicity_warning": warning},
+        next_action=next_action,
+        agent_rules=_agent_rules(),
+    )
+
+async def bind_evidence(research_id: str, bindings: list[EvidenceBinding]) -> ResearchToolResponse:
+    """Bind direct source quotations to existing claims and verify quote presence.
+
+    This tool does NOT accept semantic stance. Keeping quote binding separate
+    from entailment judgment gives weak client models one bounded operation at a
+    time and prevents a topical passage from becoming support merely because it
+    was attached to a claim.
+    """
+    state = load_state(research_id)
+    if state.get("phase") != "EVIDENCE_BINDING":
+        return _phase_violation(state, {"EVIDENCE_BINDING"}, "bind_evidence")
+    if not _all_atomicity_resolved(state):
