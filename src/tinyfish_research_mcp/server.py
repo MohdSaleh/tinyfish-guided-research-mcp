@@ -1,4 +1,5 @@
 """MCP protocol adapter and process entrypoint."""
+
 from __future__ import annotations
 
 from mcp.server import MCPServer
@@ -54,9 +55,11 @@ _TOOL_FUNCTIONS = (
 for _tool in _TOOL_FUNCTIONS:
     mcp.tool()(_tool)
 
+
 def main() -> None:
     configure_observability()
     mcp.run()
+
 
 if __name__ == "__main__":
     main()

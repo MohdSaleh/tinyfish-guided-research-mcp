@@ -1,4 +1,5 @@
 """Runtime configuration for TinyFish Guided Research MCP."""
+
 from __future__ import annotations
 
 import os
@@ -49,55 +50,130 @@ OPENALEX_API_BASE = "https://api.openalex.org"
 EXTERNAL_CHECK_TIMEOUT = 7.0
 
 TRACKING_PARAMS = {
-    "fbclid", "gclid", "dclid", "msclkid", "mc_cid", "mc_eid", "igshid",
-    "ref", "ref_src", "source", "campaign", "campaign_id",
+    "fbclid",
+    "gclid",
+    "dclid",
+    "msclkid",
+    "mc_cid",
+    "mc_eid",
+    "igshid",
+    "ref",
+    "ref_src",
+    "source",
+    "campaign",
+    "campaign_id",
 }
 SOCIAL_DOMAINS = {
-    "facebook.com", "reddit.com", "x.com", "twitter.com", "tiktok.com",
-    "instagram.com", "quora.com",
+    "facebook.com",
+    "reddit.com",
+    "x.com",
+    "twitter.com",
+    "tiktok.com",
+    "instagram.com",
+    "quora.com",
 }
 SEARCH_INTERMEDIARY_PATTERNS = (
-    "scholar.google.", "google.com/search", "bing.com/search", "duckduckgo.com",
+    "scholar.google.",
+    "google.com/search",
+    "bing.com/search",
+    "duckduckgo.com",
 )
 GENERIC_HOME_SIGNALS = (
-    "welcome to", "home page", "find a journal", "sign in | create an account",
-    "explore our questions", "all research fields", "research topics bring together",
+    "welcome to",
+    "home page",
+    "find a journal",
+    "sign in | create an account",
+    "explore our questions",
+    "all research fields",
+    "research topics bring together",
 )
 STOPWORDS = {
-    "the", "a", "an", "of", "and", "or", "in", "on", "for", "to", "is",
-    "are", "was", "were", "be", "with", "from", "that", "this", "what",
-    "how", "why", "when", "where", "who", "which", "into", "about", "does",
-    "do", "can", "could", "would", "should", "their", "its", "than", "as",
+    "the",
+    "a",
+    "an",
+    "of",
+    "and",
+    "or",
+    "in",
+    "on",
+    "for",
+    "to",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "with",
+    "from",
+    "that",
+    "this",
+    "what",
+    "how",
+    "why",
+    "when",
+    "where",
+    "who",
+    "which",
+    "into",
+    "about",
+    "does",
+    "do",
+    "can",
+    "could",
+    "would",
+    "should",
+    "their",
+    "its",
+    "than",
+    "as",
 }
+
 
 class ResearchMode(str, Enum):
     FAST = "FAST"
     BALANCED = "BALANCED"
     EXHAUSTIVE = "EXHAUSTIVE"
 
+
 MODE_POLICIES: dict[str, dict[str, int]] = {
     ResearchMode.FAST.value: {
-        "fetch_top_n_per_query": 2, "max_fetch_per_retrieval": 10,
-        "initial_review_limit_per_task": 4, "gap_review_limit": 3,
-        "max_queries_per_gap": 2, "max_initial_queries_per_task": 2,
-        "max_parallel_tasks": 4, "max_search_requests": 24,
-        "max_fetch_urls": 48, "max_default_rounds": 2,
+        "fetch_top_n_per_query": 2,
+        "max_fetch_per_retrieval": 10,
+        "initial_review_limit_per_task": 4,
+        "gap_review_limit": 3,
+        "max_queries_per_gap": 2,
+        "max_initial_queries_per_task": 2,
+        "max_parallel_tasks": 4,
+        "max_search_requests": 24,
+        "max_fetch_urls": 48,
+        "max_default_rounds": 2,
     },
     ResearchMode.BALANCED.value: {
-        "fetch_top_n_per_query": 3, "max_fetch_per_retrieval": 16,
-        "initial_review_limit_per_task": 5, "gap_review_limit": 5,
-        "max_queries_per_gap": 3, "max_initial_queries_per_task": 3,
-        "max_parallel_tasks": 6, "max_search_requests": 60,
-        "max_fetch_urls": 120, "max_default_rounds": 4,
+        "fetch_top_n_per_query": 3,
+        "max_fetch_per_retrieval": 16,
+        "initial_review_limit_per_task": 5,
+        "gap_review_limit": 5,
+        "max_queries_per_gap": 3,
+        "max_initial_queries_per_task": 3,
+        "max_parallel_tasks": 6,
+        "max_search_requests": 60,
+        "max_fetch_urls": 120,
+        "max_default_rounds": 4,
     },
     ResearchMode.EXHAUSTIVE.value: {
-        "fetch_top_n_per_query": 4, "max_fetch_per_retrieval": 24,
-        "initial_review_limit_per_task": 8, "gap_review_limit": 8,
-        "max_queries_per_gap": 5, "max_initial_queries_per_task": 5,
-        "max_parallel_tasks": 10, "max_search_requests": 140,
-        "max_fetch_urls": 280, "max_default_rounds": 6,
+        "fetch_top_n_per_query": 4,
+        "max_fetch_per_retrieval": 24,
+        "initial_review_limit_per_task": 8,
+        "gap_review_limit": 8,
+        "max_queries_per_gap": 5,
+        "max_initial_queries_per_task": 5,
+        "max_parallel_tasks": 10,
+        "max_search_requests": 140,
+        "max_fetch_urls": 280,
+        "max_default_rounds": 6,
     },
 }
+
 
 def mode_policy(state: dict[str, Any]) -> dict[str, int]:
     mode = state.get("mode", ResearchMode.FAST.value)

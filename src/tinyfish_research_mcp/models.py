@@ -1,10 +1,12 @@
 """Pydantic schemas exposed through the MCP tool contract."""
+
 from __future__ import annotations
 
 from enum import Enum
 from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field, model_validator
 from .config import PROTOCOL_VERSION
+
 
 class RetrievalSpec(BaseModel):
     purpose: str = Field(
@@ -34,11 +36,13 @@ class RetrievalSpec(BaseModel):
                 )
         return self
 
+
 class TemporalMode(str, Enum):
     CURRENT = "CURRENT"
     HISTORICAL = "HISTORICAL"
     FOUNDATIONAL = "FOUNDATIONAL"
     TIMELESS = "TIMELESS"
+
 
 class ClaimDraft(BaseModel):
     client_ref: str = Field(description="Client-only correlation label; never a claim_id.")
@@ -54,20 +58,24 @@ class ClaimDraft(BaseModel):
             raise ValueError("atomicity_override=True requires atomicity_override_reason")
         return self
 
+
 class EvidenceBinding(BaseModel):
     claim_id: str
     source_id: str
     quote: str
+
 
 class EvidenceRelationJudgment(BaseModel):
     evidence_id: str
     relation: Literal["SUPPORTS", "CONTRADICTS", "RELATED_BUT_INSUFFICIENT", "IRRELEVANT"]
     strength: float = Field(default=0.7, ge=0.0, le=1.0)
 
+
 class SourceScreening(BaseModel):
     source_id: str
     verdict: Literal["RELEVANT", "PARTIAL", "IRRELEVANT"]
     reason: str = Field(min_length=3, max_length=500)
+
 
 class CandidateEvidenceReview(BaseModel):
     claim_id: str
@@ -84,6 +92,7 @@ class CandidateEvidenceReview(BaseModel):
             raise ValueError("relation is required when quote is provided")
         return self
 
+
 class GapPlan(BaseModel):
     claim_id: str
     queries: list[str] = Field(min_length=1, max_length=6)
@@ -91,16 +100,19 @@ class GapPlan(BaseModel):
     reason: str
     retrieval: RetrievalSpec = Field(default_factory=RetrievalSpec)
 
+
 class CitationCheck(BaseModel):
     claim_id: str
     source_id: str
     quote: str
+
 
 class ClaimTension(BaseModel):
     claim_id_a: str
     claim_id_b: str
     description: str
     resolution: Optional[str] = None
+
 
 class SubagentTask(BaseModel):
     subagent_id: str
@@ -113,10 +125,12 @@ class SubagentTask(BaseModel):
     related_topics: list[str] = Field(default_factory=list)
     seeks_disconfirming_evidence: bool = False
 
+
 class ResearchPlan(BaseModel):
     execution_mode: Literal["parallel_subagents", "sequential"] = "parallel_subagents"
     tasks: list[SubagentTask] = Field(default_factory=list)
     sequential_steps: list[str] = Field(default_factory=list)
+
 
 class NextAction(BaseModel):
     tool: str
@@ -125,6 +139,7 @@ class NextAction(BaseModel):
     required_input: dict[str, Any] = Field(default_factory=dict)
     completion_condition: Optional[str] = None
 
+
 class ResearchToolResponse(BaseModel):
     status: str
     data: dict[str, Any] = Field(default_factory=dict)
@@ -132,6 +147,7 @@ class ResearchToolResponse(BaseModel):
     quality_gate: Optional[dict[str, Any]] = None
     agent_rules: list[str] = Field(default_factory=list)
     protocol_version: str = PROTOCOL_VERSION
+
 
 class ClaimAssessment(BaseModel):
     claim_id: str

@@ -4,6 +4,7 @@ The MCP SDK v2 already emits protocol-level spans. This module adds a minimal
 application layer that can export through OTLP when the optional observability
 extra is installed. When it is not installed, tracing remains a safe no-op.
 """
+
 from __future__ import annotations
 
 import json

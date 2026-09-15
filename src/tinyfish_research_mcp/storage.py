@@ -1,4 +1,5 @@
 """SQLite persistence for research state and fetched source content."""
+
 from __future__ import annotations
 
 import asyncio
@@ -14,6 +15,7 @@ from .config import DB_PATH
 
 _STATE_CACHE: dict[str, dict[str, Any]] = {}
 _SESSION_LOCKS: dict[str, asyncio.Lock] = {}
+
 
 def _get_db() -> sqlite3.Connection:
     db_path = Path(DB_PATH)
@@ -34,12 +36,14 @@ def _get_db() -> sqlite3.Connection:
     )
     return conn
 
+
 def _json_default(obj: Any) -> Any:
     if isinstance(obj, set):
         return sorted(obj)
     if isinstance(obj, Enum):
         return obj.value
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
 
 def store_source_content(research_id: str, source_id: str, content: str, content_hash: str) -> None:
     conn = _get_db()
@@ -53,6 +57,7 @@ def store_source_content(research_id: str, source_id: str, content: str, content
     finally:
         conn.close()
 
+
 def load_source_content(research_id: str, source_id: str) -> str:
     conn = _get_db()
     try:
@@ -64,6 +69,7 @@ def load_source_content(research_id: str, source_id: str) -> str:
         conn.close()
     return row[0] if row else ""
 
+
 def get_source_content(state: dict[str, Any], source_id: str) -> str:
     source = state.get("sources", {}).get(source_id, {})
     content = source.get("content")
@@ -71,6 +77,7 @@ def get_source_content(state: dict[str, Any], source_id: str) -> str:
         content = load_source_content(state["research_id"], source_id)
         source["content"] = content
     return content or ""
+
 
 def persist(state: dict[str, Any]) -> None:
     research_id = state["research_id"]
@@ -90,6 +97,7 @@ def persist(state: dict[str, Any]) -> None:
     finally:
         conn.close()
 
+
 def load_state_raw(research_id: str) -> dict[str, Any]:
     if research_id in _STATE_CACHE:
         return _STATE_CACHE[research_id]
@@ -107,8 +115,10 @@ def load_state_raw(research_id: str) -> dict[str, Any]:
     _STATE_CACHE[research_id] = state
     return state
 
+
 def session_lock(research_id: str) -> asyncio.Lock:
     return _SESSION_LOCKS.setdefault(research_id, asyncio.Lock())
+
 
 def clear_process_cache() -> None:
     """Testing/maintenance helper. Persistent SQLite state is untouched."""

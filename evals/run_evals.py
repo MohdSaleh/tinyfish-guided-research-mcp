@@ -1,4 +1,5 @@
 """Deterministic release evaluator for the research integrity gates."""
+
 from __future__ import annotations
 
 import asyncio
@@ -71,13 +72,23 @@ def evaluate_weak_single_source() -> bool:
     source = _base_source("s1", "10.1000/one", "one.example", quote)
     state["sources"]["s1"] = source
     _attach_source_to_work(state, source)
-    state["evidence"].append({
-        "evidence_id": "e1", "claim_id": "claim_1", "source_id": "s1",
-        "quote": quote, "quote_verified": True, "relation": "SUPPORTS",
-        "strength": 0.95, "source_relevance": 1.0,
-    })
+    state["evidence"].append(
+        {
+            "evidence_id": "e1",
+            "claim_id": "claim_1",
+            "source_id": "s1",
+            "quote": quote,
+            "quote_verified": True,
+            "relation": "SUPPORTS",
+            "strength": 0.95,
+            "source_relevance": 1.0,
+        }
+    )
     assessment = assess_one_claim(state, _claim())
-    return assessment.status == "PROVISIONAL_SUPPORTED" and "insufficient_independent_works" in assessment.metrics["quality_flags"]
+    return (
+        assessment.status == "PROVISIONAL_SUPPORTED"
+        and "insufficient_independent_works" in assessment.metrics["quality_flags"]
+    )
 
 
 def evaluate_superseded_claim() -> bool:
@@ -123,16 +134,18 @@ async def evaluate_citation_coverage() -> bool:
             state["sources"][sid] = source
             _attach_source_to_work(state, source)
             storage.store_source_content(state["research_id"], sid, source["content"], "hash-" + sid)
-            state["evidence"].append({
-                "evidence_id": "e-" + sid,
-                "claim_id": "claim_1",
-                "source_id": sid,
-                "quote": quote,
-                "quote_verified": True,
-                "relation": "SUPPORTS",
-                "strength": 0.95,
-                "source_relevance": 1.0,
-            })
+            state["evidence"].append(
+                {
+                    "evidence_id": "e-" + sid,
+                    "claim_id": "claim_1",
+                    "source_id": sid,
+                    "quote": quote,
+                    "quote_verified": True,
+                    "relation": "SUPPORTS",
+                    "strength": 0.95,
+                    "source_relevance": 1.0,
+                }
+            )
         storage.persist(state)
         result = await verify_citations("res_eval")
         return (

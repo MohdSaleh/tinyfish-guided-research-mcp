@@ -1,11 +1,12 @@
 """External provider clients: TinyFish Search/Fetch, Crossref and OpenAlex."""
+
 from __future__ import annotations
 
 import asyncio
 import json
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from email.utils import parsedate_to_datetime
 from typing import Any, Literal, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -13,14 +14,29 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import httpx
 
 from .config import (
-    BASE_BACKOFF_SECONDS, CROSSREF_API_BASE, ENABLE_CROSSREF_CHECKS, ENABLE_OPENALEX_CHECKS,
-    EXTERNAL_CHECK_TIMEOUT, FETCH_BATCH_SIZE, FETCH_URLS_PER_MINUTE, MAX_INFLIGHT_FETCH,
-    MAX_INFLIGHT_SEARCH, MAX_RETRIES, OPENALEX_API_BASE, RATE_COOLDOWN_FACTOR,
-    RATE_COOLDOWN_SECONDS, RETRYABLE_STATUS, SEARCH_REQUESTS_PER_MINUTE, TINYFISH_API_KEY,
-    TINYFISH_FETCH_URL, TINYFISH_SEARCH_URL, TRACKING_PARAMS,
+    BASE_BACKOFF_SECONDS,
+    CROSSREF_API_BASE,
+    ENABLE_CROSSREF_CHECKS,
+    ENABLE_OPENALEX_CHECKS,
+    EXTERNAL_CHECK_TIMEOUT,
+    FETCH_BATCH_SIZE,
+    FETCH_URLS_PER_MINUTE,
+    MAX_INFLIGHT_FETCH,
+    MAX_INFLIGHT_SEARCH,
+    MAX_RETRIES,
+    OPENALEX_API_BASE,
+    RATE_COOLDOWN_FACTOR,
+    RATE_COOLDOWN_SECONDS,
+    RETRYABLE_STATUS,
+    SEARCH_REQUESTS_PER_MINUTE,
+    TINYFISH_API_KEY,
+    TINYFISH_FETCH_URL,
+    TINYFISH_SEARCH_URL,
+    TRACKING_PARAMS,
 )
 from .models import RetrievalSpec
 from .observability import log_event, span
+
 
 class TokenBucket:
     def __init__(self, rate_per_minute: float):
@@ -56,6 +72,7 @@ class TokenBucket:
         self.cooldown_factor = RATE_COOLDOWN_FACTOR
         self.cooldown_until = time.monotonic() + RATE_COOLDOWN_SECONDS
 
+
 _SEARCH_BUCKET = TokenBucket(SEARCH_REQUESTS_PER_MINUTE)
 _FETCH_BUCKET = TokenBucket(FETCH_URLS_PER_MINUTE)
 _SEARCH_SEMAPHORE = asyncio.Semaphore(MAX_INFLIGHT_SEARCH)
@@ -72,6 +89,7 @@ def get_http_client() -> httpx.AsyncClient:
             follow_redirects=True,
         )
     return _HTTP_CLIENT
+
 
 async def _request_with_retry(
     method: str,
@@ -105,12 +123,12 @@ async def _request_with_retry(
                 if resp.status_code == 429:
                     _SEARCH_BUCKET.trigger_cooldown()
                     _FETCH_BUCKET.trigger_cooldown()
-                await asyncio.sleep(BASE_BACKOFF_SECONDS * (2 ** attempt))
+                await asyncio.sleep(BASE_BACKOFF_SECONDS * (2**attempt))
                 continue
             return resp
         except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError) as exc:
             last_exc = exc
-            await asyncio.sleep(BASE_BACKOFF_SECONDS * (2 ** attempt))
+            await asyncio.sleep(BASE_BACKOFF_SECONDS * (2**attempt))
 
     if last_resp is not None:
         return last_resp
@@ -118,11 +136,13 @@ async def _request_with_retry(
         raise RuntimeError(f"Request to {url!r} failed after retries: {last_exc}") from last_exc
     raise RuntimeError(f"Request to {url!r} failed with no response")
 
+
 def _domain_of(url: str) -> str:
     try:
         return (urlsplit(url).hostname or "").lower().removeprefix("www.")
     except Exception:
         return ""
+
 
 def _registrable_domain(domain: str) -> str:
     parts = [p for p in domain.lower().split(".") if p]
@@ -132,6 +152,7 @@ def _registrable_domain(domain: str) -> str:
     if len(parts[-1]) == 2 and parts[-2] in common_second and len(parts) >= 3:
         return ".".join(parts[-3:])
     return ".".join(parts[-2:])
+
 
 def _canonicalize_url(url: str) -> str:
     try:
@@ -154,6 +175,7 @@ def _canonicalize_url(url: str) -> str:
     except Exception:
         return url
 
+
 def _parse_date_to_ts(value: Any) -> Optional[float]:
     if value is None:
         return None
@@ -170,6 +192,7 @@ def _parse_date_to_ts(value: Any) -> Optional[float]:
         return parsedate_to_datetime(s).timestamp()
     except Exception:
         return None
+
 
 async def _do_search(query: str, spec: RetrievalSpec) -> list[dict[str, Any]]:
     params: dict[str, Any] = {"query": query, "language": spec.language, "domain_type": spec.domain_type}
@@ -226,6 +249,7 @@ async def _do_search(query: str, spec: RetrievalSpec) -> list[dict[str, Any]]:
             }
         )
     return out
+
 
 async def _do_fetch_batch(urls: list[str], purpose: str) -> dict[str, dict[str, Any]]:
     body: dict[str, Any] = {
@@ -289,6 +313,7 @@ async def _do_fetch_batch(urls: list[str], purpose: str) -> dict[str, dict[str, 
             }
     return out
 
+
 async def _fetch_many(urls: list[str], purpose: str) -> tuple[dict[str, dict[str, Any]], int]:
     chunks = [urls[i : i + FETCH_BATCH_SIZE] for i in range(0, len(urls), FETCH_BATCH_SIZE)]
 
@@ -312,6 +337,7 @@ async def _fetch_many(urls: list[str], purpose: str) -> tuple[dict[str, dict[str
     for batch in batches:
         merged.update(batch)
     return merged, len(chunks)
+
 
 async def _check_retraction(url: Optional[str]) -> dict[str, Any]:
     result = {"checked": False, "retracted": False, "corrected": False, "concern_flagged": False}
@@ -343,6 +369,7 @@ async def _check_retraction(url: Optional[str]) -> dict[str, Any]:
     _RETRACTION_CACHE[doi] = result
     return result
 
+
 async def _check_author(author: Optional[str]) -> dict[str, Any]:
     result = {"checked": False, "retracted_count": 0}
     if not ENABLE_OPENALEX_CHECKS or not author:
@@ -372,9 +399,11 @@ async def _check_author(author: Optional[str]) -> dict[str, Any]:
     _AUTHOR_CACHE[author] = result
     return result
 
+
 _DOI_RE = re.compile(r"10\.\d{4,9}/[^\s&?#\"\']+", re.I)
 _RETRACTION_CACHE: dict[str, dict[str, Any]] = {}
 _AUTHOR_CACHE: dict[str, dict[str, Any]] = {}
+
 
 async def close_http_client() -> None:
     global _HTTP_CLIENT
