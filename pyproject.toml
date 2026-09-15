@@ -1,0 +1,55 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tinyfish-guided-research-mcp"
+version = "1.0.0"
+description = "Auditable deep-research MCP server powered by TinyFish Search and Fetch"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "MohdSaleh"}]
+dependencies = [
+  "mcp>=2,<3",
+  "httpx>=0.28,<1",
+  "pydantic>=2.10,<3",
+]
+
+[project.optional-dependencies]
+observability = [
+  "opentelemetry-sdk>=1.30,<2",
+  "opentelemetry-exporter-otlp>=1.30,<2",
+]
+dev = [
+  "pytest>=8,<9",
+  "pytest-anyio>=0.0.0",
+  "ruff>=0.12,<1",
+  "pyright>=1.1.400,<2",
+  "pip-audit>=2.8,<3",
+  "build>=1.2,<2",
+]
+
+[project.scripts]
+tinyfish-research-mcp = "tinyfish_research_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tinyfish_research_mcp"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+ignore = ["E501"]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+reportMissingImports = "warning"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
