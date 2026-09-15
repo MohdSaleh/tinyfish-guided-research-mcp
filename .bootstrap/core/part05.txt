@@ -1,0 +1,200 @@
+            "support_weight": best_support[2] if best_support else 0.0,
+            "contradict_weight": best_contradict[2] if best_contradict else 0.0,
+            "copy_count": len(rows),
+        })
+    return out
+
+def assess_one_claim(state: dict[str, Any], claim: dict[str, Any]) -> ClaimAssessment:
+    eligible = [
+        e for e in state.get("evidence", [])
+        if e["claim_id"] == claim["claim_id"]
+        and e.get("quote_verified")
+        and e.get("relation") in {"SUPPORTS", "CONTRADICTS"}
+    ]
+    if not eligible:
+        return ClaimAssessment(
+            claim_id=claim["claim_id"], status="UNKNOWN", stance_confidence=0.0,
+            evidence_quality=0.0, resolution_confidence=0.0,
+            metrics={"had_eligible_evidence": False},
+        )
+
+    records = []
+    for ev in eligible:
+        source = state.get("sources", {}).get(ev["source_id"], {})
+        if source.get("screen_status") != "ACCEPTED":
+            continue
+        records.append((ev, source, _evidence_weight(claim, ev, source)))
+
+    if not records:
+        return ClaimAssessment(
+            claim_id=claim["claim_id"], status="UNKNOWN", stance_confidence=0.0,
+            evidence_quality=0.0, resolution_confidence=0.0,
+            metrics={"had_eligible_evidence": False},
+        )
+
+    work_rows = _aggregate_evidence_by_work(records)
+    directional = [w for w in work_rows if w.get("relation") in {"SUPPORTS", "CONTRADICTS"}]
+    support = sum(w["weight"] for w in directional if w["relation"] == "SUPPORTS")
+    contradict = sum(w["weight"] for w in directional if w["relation"] == "CONTRADICTS")
+    total = support + contradict
+    stance_conf = abs(support - contradict) / total if total > 0 else 0.0
+    direction = "SUPPORTS" if support >= contradict else "CONTRADICTS"
+    winning = [w for w in directional if w["relation"] == direction]
+
+    winning_work_ids = {w["work_id"] for w in winning}
+    independent_winning_work_ids = {
+        w["work_id"] for w in winning
+        if float(w["source"].get("work_identity_confidence", 0.35)) >= 0.70
+    }
+    contradicting_work_ids = {
+        w["work_id"] for w in directional
+        if w["relation"] == "CONTRADICTS" and float(w["source"].get("work_identity_confidence", 0.35)) >= 0.70
+    }
+    winning_domains = {
+        w["source"].get("registered_domain") for w in winning
+        if w["source"].get("registered_domain")
+    }
+    internal_conflicts = [w["work_id"] for w in work_rows if w.get("internal_conflict")]
+
+    work_count_factor = min(1.0, len(independent_winning_work_ids) / max(1, MIN_INDEPENDENT_WORKS))
+    quote_ratio = sum(1 for w in winning if w["evidence"].get("quote_verified")) / max(1, len(winning))
+    full_fetch_ratio = sum(
+        1 for w in winning
+        if w["source"].get("content_origin") == "fetch" and not w["source"].get("fetch_failed")
+    ) / max(1, len(winning))
+    relevance_avg = sum(_source_screen_relevance(w["source"]) for w in winning) / max(1, len(winning))
+    authority_avg = sum(w["source"].get("authority_score", 0.5) for w in winning) / max(1, len(winning))
+    temporal_avg = sum(_temporal_weight(claim, w["source"]) for w in winning) / max(1, len(winning))
+    host_diversity = min(1.0, len(winning_domains) / max(1, len(winning_work_ids)))
+
+    evidence_quality = (
+        0.20 * work_count_factor
+        + 0.15 * quote_ratio
+        + 0.15 * full_fetch_ratio
+        + 0.15 * relevance_avg
+        + 0.20 * authority_avg
+        + 0.10 * temporal_avg
+        + 0.05 * host_diversity
+    )
+
+    any_full_fetch = any(
+        w["source"].get("content_origin") == "fetch" and not w["source"].get("fetch_failed")
+        for w in winning
+    )
+    max_authority = max((w["source"].get("authority_score", 0.0) for w in winning), default=0.0)
+    sufficient = (
+        len(independent_winning_work_ids) >= MIN_INDEPENDENT_WORKS
+        and any_full_fetch
+        and max_authority >= MIN_AUTHORITY_FOR_STRONG_RESOLUTION
+        and evidence_quality >= MIN_EVIDENCE_QUALITY
+        and stance_conf >= MIN_STANCE_CONFIDENCE
+    )
+
+    adversarial_required = bool(state.get("contested"))
+    adversarial_done = bool(claim.get("disconfirmation_attempted"))
+
+    if total == 0:
+        status = "CONTESTED" if internal_conflicts else "UNKNOWN"
+    elif stance_conf < CONTESTED_MARGIN_THRESHOLD:
+        status = "CONTESTED"
+    elif len(contradicting_work_ids) >= MIN_DISSENTING_WORKS_FOR_OVERRIDE and direction == "SUPPORTS":
+        status = "CONTESTED"
+    elif sufficient and (not adversarial_required or adversarial_done):
+        status = "SUPPORTED" if direction == "SUPPORTS" else "CONTRADICTED"
+    else:
+        status = "PROVISIONAL_SUPPORTED" if direction == "SUPPORTS" else "PROVISIONAL_CONTRADICTED"
+
+    resolution_conf = min(stance_conf, evidence_quality)
+    flags = []
+    if len(independent_winning_work_ids) < MIN_INDEPENDENT_WORKS:
+        flags.append("insufficient_independent_works")
+    if not any_full_fetch:
+        flags.append("no_full_fetch_evidence")
+    if max_authority < MIN_AUTHORITY_FOR_STRONG_RESOLUTION:
+        flags.append("no_sufficiently_authoritative_source")
+    if adversarial_required and not adversarial_done:
+        flags.append("disconfirmation_attempt_required")
+    if evidence_quality < MIN_EVIDENCE_QUALITY:
+        flags.append("evidence_quality_below_threshold")
+    if internal_conflicts:
+        flags.append("within_work_judgment_conflict")
+
+    return ClaimAssessment(
+        claim_id=claim["claim_id"],
+        status=status,
+        stance_confidence=round(stance_conf, 4),
+        evidence_quality=round(evidence_quality, 4),
+        resolution_confidence=round(resolution_conf, 4),
+        metrics={
+            "had_eligible_evidence": True,
+            "support_weight": round(support, 4),
+            "contradict_weight": round(contradict, 4),
+            "winning_direction": direction,
+            "winning_independent_works": len(independent_winning_work_ids),
+            "winning_work_ids": sorted(winning_work_ids),
+            "independence_eligible_work_ids": sorted(independent_winning_work_ids),
+            "low_confidence_work_ids": sorted(winning_work_ids - independent_winning_work_ids),
+            "winning_host_domains": len(winning_domains),
+            "contradicting_work_count": len(contradicting_work_ids),
+            "full_fetch_ratio": round(full_fetch_ratio, 4),
+            "authority_avg": round(authority_avg, 4),
+            "temporal_avg": round(temporal_avg, 4),
+            "host_diversity": round(host_diversity, 4),
+            "within_work_conflicts": internal_conflicts,
+            "raw_evidence_records": len(records),
+            "independent_work_records": len(work_rows),
+            "disconfirmation_attempted": adversarial_done,
+            "quality_flags": flags,
+        },
+    )
+
+def _assessment_partition(assessments: list[ClaimAssessment]) -> dict[str, list[ClaimAssessment]]:
+    out = {"resolved": [], "provisional": [], "contested": [], "unknown": []}
+    for a in assessments:
+        if a.status in {"SUPPORTED", "CONTRADICTED"}:
+            out["resolved"].append(a)
+        elif a.status.startswith("PROVISIONAL_"):
+            out["provisional"].append(a)
+        elif a.status == "CONTESTED":
+            out["contested"].append(a)
+        else:
+            out["unknown"].append(a)
+    return out
+
+def _agent_rules() -> list[str]:
+    return [
+        "Never invent server IDs or inspect implementation state to choose the next tool.",
+        "Follow next_action exactly; it contains the complete bounded task.",
+        "RELATED_BUT_INSUFFICIENT means topical evidence that does not establish the claim.",
+        "Stop researching any claim already strongly resolved by the server.",
+        "Treat different URLs/hosts with the same work_id as one evidence family, never independent confirmation.",
+        "Do not introduce new factual claims during final synthesis outside synthesis_manifest.",
+    ]
+
+def _next(tool: str, reason: str, instructions: list[str], required_input: Optional[dict[str, Any]] = None,
+          completion_condition: Optional[str] = None) -> NextAction:
+    return NextAction(
+        tool=tool,
+        reason=reason,
+        instructions=instructions,
+        required_input=required_input or {},
+        completion_condition=completion_condition,
+    )
+
+def _research_quality_summary(state: dict[str, Any]) -> dict[str, Any]:
+    accepted = [s for s in state.get("sources", {}).values() if s.get("screen_status") == "ACCEPTED"]
+    return {
+        "phase": state.get("phase"),
+        "accepted_source_copies": len(accepted),
+        "accepted_unique_works": len({_work_id_for_source(s) for s in accepted}),
+        "active_claims": len(_active_claims(state)),
+        "verified_citations": len(state.get("verified_citations", [])),
+        "metrics": state.get("metrics", {}),
+        "elapsed_ms": _elapsed_ms(state),
+    }
+
+async def init_research(
+    topic: str,
+    max_rounds: Optional[int] = None,
+    contested: bool = False,
+    mode: ResearchMode = ResearchMode.FAST,
