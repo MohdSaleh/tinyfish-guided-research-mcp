@@ -1,0 +1,35 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.MohdSaleh/tinyfish-guided-research",
+  "title": "TinyFish Guided Research",
+  "description": "Auditable deep-research MCP server powered by TinyFish Search and Fetch.",
+  "repository": {
+    "url": "https://github.com/MohdSaleh/tinyfish-guided-research-mcp",
+    "source": "github"
+  },
+  "version": "1.0.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "tinyfish-guided-research-mcp",
+      "version": "1.0.0",
+      "transport": {"type": "stdio"},
+      "environmentVariables": [
+        {
+          "name": "TINYFISH_API_KEY",
+          "description": "TinyFish API key used by Search and Fetch.",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "RESEARCH_DB_PATH",
+          "description": "SQLite persistence path. Defaults to research_state.db.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}
