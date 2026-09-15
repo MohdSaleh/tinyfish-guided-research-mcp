@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "duplicate_work_mirrors",
+      "kind": "deterministic",
+      "description": "Two URLs for the same DOI must count as one independent work."
+    },
+    {
+      "id": "quote_mismatch",
+      "kind": "deterministic",
+      "description": "A quote absent from stored source content must never verify."
+    },
+    {
+      "id": "weak_single_source",
+      "kind": "deterministic",
+      "description": "One weak supporting work must not become strongly SUPPORTED."
+    },
+    {
+      "id": "superseded_claim",
+      "kind": "deterministic",
+      "description": "Superseded claims must not block finalization."
+    },
+    {
+      "id": "citation_coverage",
+      "kind": "deterministic",
+      "description": "Every strongly resolved factual claim needs server-audited citation coverage."
+    }
+  ]
+}
