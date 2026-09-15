@@ -1,0 +1,199 @@
+                "RELEVANT means directly useful evidence; PARTIAL means useful context but insufficient alone; otherwise IRRELEVANT.",
+            ],
+            {"research_id": research_id, "screenings_for": [x["source_id"] for x in review_queue]},
+            "Every source in review_queue receives one verdict.",
+        ),
+        quality_gate={"candidate_source_gate": "PENDING_CLIENT_SCREEN"},
+        agent_rules=_agent_rules(),
+    )
+
+async def discovery_search(
+    research_id: str,
+    queries: list[str],
+    purpose: str,
+    retrieval: Optional[RetrievalSpec] = None,
+) -> ResearchToolResponse:
+    """Run a compact additional retrieval wave; later waves consume the global follow-up budget."""
+    state = load_state(research_id)
+    if state.get("phase") not in {"PLANNED", "RETRIEVING", "SOURCE_SCREENING", "EVIDENCE_BINDING", "ASSESSED", "GAP_RESEARCH"}:
+        return _phase_violation(state, {"PLANNED", "EVIDENCE_BINDING", "ASSESSED"}, "get_research_state")
+    if int(state.get("metrics", {}).get("retrieval_waves", 0)) > 0:
+        if not _consume_followup_round(state, reason="discovery_search"):
+            state["phase"] = "CLAIM_GRAPH_STABLE" if state.get("claims") else "CLAIM_REGISTRATION"
+            persist(state)
+            return ResearchToolResponse(
+                status="FOLLOWUP_BUDGET_EXHAUSTED",
+                data={"followup_rounds": state.get("followup_rounds"), "max_followup_rounds": state.get("policy", {}).get("max_followup_rounds")},
+                next_action=_next(
+                    "assess_claims" if state.get("claims") else "register_claims",
+                    "Global follow-up retrieval budget is exhausted.",
+                    ["Preserve uncertainty rather than bypassing the budget."],
+                ),
+                agent_rules=_agent_rules(),
+            )
+    spec = retrieval or RetrievalSpec(purpose=purpose)
+    if not spec.purpose:
+        spec.purpose = purpose
+    policy = _mode_policy(state)
+    budget = _budget_remaining(state)
+    if budget["search_requests"] <= 0 or budget["fetch_urls"] <= 0:
+        state["phase"] = "CLAIM_GRAPH_STABLE" if state.get("claims") else "CLAIM_REGISTRATION"
+        persist(state)
+        return ResearchToolResponse(
+            status="RETRIEVAL_BUDGET_EXHAUSTED",
+            data={"remaining_budget": budget},
+            next_action=_next(
+                "assess_claims" if state.get("claims") else "register_claims",
+                "The global network budget is exhausted.",
+                ["Preserve uncertainty; do not bypass the mode budget."],
+            ),
+            agent_rules=_agent_rules(),
+        )
+    query_cap = min(int(policy["max_queries_per_gap"]), budget["search_requests"])
+    fetch_cap = min(int(policy["max_fetch_per_retrieval"]), budget["fetch_urls"])
+    contexts, metrics = await _retrieve_candidates(
+        queries[: query_cap], spec, state["executed_queries_set"], purpose,
+        fetch_top_n_per_query=policy["fetch_top_n_per_query"],
+        max_fetch_per_retrieval=fetch_cap,
+    )
+    _apply_metrics(state, metrics)
+    source_ids = _register_candidates(state, contexts)
+    shortlist = _shortlist_for_review(state, source_ids, purpose, policy["initial_review_limit_per_task"])
+    state["metrics"]["sources_presented_to_client"] += len(shortlist)
+    state["phase"] = "SOURCE_SCREENING"
+    persist(state)
+    return ResearchToolResponse(
+        status="DISCOVERY_COMPLETE",
+        data={"review_queue": shortlist},
+        next_action=_next(
+            "screen_sources", "Screen the compact review_queue before using any new source.",
+            ["Screen exactly the returned source IDs; deferred sources do not block progress."],
+            {"screenings_for": [x["source_id"] for x in shortlist]},
+        ),
+        agent_rules=_agent_rules(),
+    )
+
+async def screen_sources(research_id: str, screenings: list[SourceScreening]) -> ResearchToolResponse:
+    """Initial semantic source gate over only the server-provided review shortlist."""
+    state = load_state(research_id)
+    if state.get("phase") != "SOURCE_SCREENING":
+        return _phase_violation(state, {"SOURCE_SCREENING"}, "screen_sources")
+
+    pending = {sid for sid, s in state.get("sources", {}).items() if s.get("screen_status") == "PENDING"}
+    supplied = {s.source_id for s in screenings}
+    unknown = supplied - set(state.get("sources", {}))
+    if unknown:
+        raise ValueError(f"Unknown source IDs: {sorted(unknown)}")
+
+    accepted: list[str] = []
+    rejected: list[dict[str, Any]] = []
+    newly_accepted: list[dict[str, Any]] = []
+    for screening in screenings:
+        source = state["sources"][screening.source_id]
+        if source.get("screen_status") == "AUTO_REJECTED":
+            rejected.append({"source_id": screening.source_id, "reason": "mechanical_auto_reject"})
+            continue
+        source["client_screen_verdict"] = screening.verdict
+        source["screen_reason"] = screening.reason
+        if source.get("mechanical_gate_passed") and screening.verdict in {"RELEVANT", "PARTIAL"}:
+            source["screen_status"] = "ACCEPTED"
+            accepted.append(screening.source_id)
+            newly_accepted.append(source)
+        else:
+            source["screen_status"] = "REJECTED"
+            rejected.append({"source_id": screening.source_id, "reason": screening.reason})
+
+    # FAST mode defers expensive Crossref/OpenAlex checks until a source is
+    # actually used as evidence. Other modes enrich accepted sources eagerly.
+    if newly_accepted and state.get("mode") != ResearchMode.FAST.value:
+        await asyncio.gather(*(_enrich_source(s) for s in newly_accepted))
+
+    remaining = sorted(pending - supplied)
+    total_accepted = sum(1 for s in state.get("sources", {}).values() if s.get("screen_status") == "ACCEPTED")
+    if remaining:
+        remaining_contexts = _pending_source_contexts(state, remaining, state.get("topic", ""))
+        next_action = _next(
+            "screen_sources", "Some shortlisted sources remain unscreened.",
+            ["Screen only data.remaining_contexts; deferred sources are intentionally ignored."],
+            {"screenings_for": remaining},
+        )
+        status = "SOURCE_SCREENING_INCOMPLETE"
+    elif not state.get("claims") and total_accepted == 0:
+        state["phase"] = "RETRIEVING"
+        remaining_contexts = []
+        next_action = _next(
+            "discovery_search", "No evidence-grade source survived the shortlist.",
+            ["Use fewer, more specific queries and the correct domain_type."],
+        )
+        status = "NO_ACCEPTABLE_SOURCES"
+    elif not state.get("claims"):
+        state["phase"] = "CLAIM_REGISTRATION"
+        remaining_contexts = []
+        next_action = _next(
+            "register_claims", "Initial sources are screened; register atomic claims.",
+            ["Create claims only. The server will suggest likely evidence sources after registration."],
+        )
+        status = "SOURCES_SCREENED"
+    else:
+        remaining_contexts = []
+        candidates = _prepare_candidate_review_queue(state, per_claim=4)
+        if state.get("candidate_review_queue"):
+            state["phase"] = "CANDIDATE_REVIEW"
+            next_action = _next(
+                "review_candidates", "Accepted sources are ready for unified relevance + quote + entailment review.",
+                ["Review only data.evidence_candidates; no get_research_state, bind_evidence, or judge_evidence call is needed."],
+                {"review_batches": candidates},
+            )
+            status = "SOURCES_SCREENED_REVIEW_REQUIRED"
+        else:
+            state["phase"] = "ASSESSED"
+            next_action = _next("assess_claims", "No new claim/source pair survived candidate selection.", ["Assess and let the server identify any remaining research gaps."])
+            status = "SOURCES_SCREENED_NO_NEW_CANDIDATES"
+
+    persist(state)
+    return ResearchToolResponse(
+        status=status,
+        data={
+            "accepted_source_ids": accepted,
+            "rejected": rejected,
+            "remaining_pending": remaining,
+            "remaining_contexts": remaining_contexts,
+            "total_accepted_sources": total_accepted,
+        },
+        next_action=next_action,
+        quality_gate={"source_screening": "PASS" if not remaining else "PENDING"},
+        agent_rules=_agent_rules(),
+    )
+
+async def register_claims(research_id: str, claims: list[ClaimDraft]) -> ResearchToolResponse:
+    """Register new claims only; does not accept evidence.
+
+    This separation prevents claim creation and evidence judgment from being
+    conflated in one call. Server generates every claim_id.
+    """
+    state = load_state(research_id)
+    if state.get("phase") not in {"CLAIM_REGISTRATION", "EVIDENCE_BINDING", "ASSESSED"}:
+        return _phase_violation(state, {"CLAIM_REGISTRATION"}, "register_claims")
+
+    mapping: dict[str, str] = {}
+    warnings: dict[str, str] = {}
+    evidence_candidates: list[dict[str, Any]] = []
+    for draft in claims:
+        cid = f"claim_{uuid.uuid4().hex[:12]}"
+        warning = None if draft.atomicity_override else _atomicity_warning(draft.text, 0)
+        record = {
+            "claim_id": cid,
+            "client_ref": draft.client_ref,
+            "text": draft.text,
+            "entity": draft.entity,
+            "temporal_mode": draft.temporal_mode.value,
+            "split_depth": 0,
+            "atomicity_status": "OVERRIDDEN" if draft.atomicity_override else ("REVIEW_REQUIRED" if warning else "PASS"),
+            "atomicity_override_reason": draft.atomicity_override_reason,
+            "created_at": time.time(),
+            "disconfirmation_attempted": False,
+        }
+        state["claims"].append(record)
+        mapping[draft.client_ref] = cid
+        if warning:
+            warnings[cid] = warning
