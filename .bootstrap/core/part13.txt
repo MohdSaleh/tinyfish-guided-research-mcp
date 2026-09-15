@@ -1,0 +1,200 @@
+        if state.get("contested") and not state.get("tension_review_done") and state.get("phase") == "CLAIM_GRAPH_STABLE":
+            expected = "review_claim_tensions"
+        return _phase_violation(state, {"READY_TO_FINALIZE"}, expected)
+
+    assessments = [assess_one_claim(state, c) for c in _active_claims(state)]
+    amap = {a.claim_id: a for a in assessments}
+    citations_by_claim: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for c in state.get("verified_citations", []):
+        source = state.get("sources", {}).get(c["source_id"], {})
+        citations_by_claim[c["claim_id"]].append({
+            "source_id": c["source_id"],
+            "work_id": c.get("work_id") or source.get("work_id"),
+            "url": source.get("final_url") or source.get("url"),
+            "title": source.get("title"),
+            "domain_type": source.get("domain_type"),
+            "host_domain": source.get("host_domain") or source.get("registered_domain"),
+            "source_role": source.get("source_role"),
+            "publication_status": source.get("publication_status"),
+            "publication_venue": source.get("publication_venue") or source.get("venue"),
+            "work_identity_type": source.get("work_identity_type"),
+            "work_identity_confidence": source.get("work_identity_confidence"),
+            "quote": c["quote"],
+        })
+
+    resolved, unresolved = [], []
+    for claim in _active_claims(state):
+        a = amap[claim["claim_id"]]
+        item = {
+            "claim_id": claim["claim_id"],
+            "text": claim["text"],
+            "status": a.status,
+            "stance_confidence": a.stance_confidence,
+            "evidence_quality": a.evidence_quality,
+            "resolution_confidence": a.resolution_confidence,
+            "metrics": a.metrics,
+            "citations": citations_by_claim.get(claim["claim_id"], []),
+            "synthesis_class": "DIRECTLY_SUPPORTED" if a.status in {"SUPPORTED", "CONTRADICTED"} else "UNRESOLVED_OR_PROVISIONAL",
+        }
+        (resolved if a.status in {"SUPPORTED", "CONTRADICTED"} else unresolved).append(item)
+
+    accepted_sources = [s for s in state.get("sources", {}).values() if s.get("screen_status") == "ACCEPTED"]
+    accepted_work_ids = {_work_id_for_source(s) for s in accepted_sources}
+    source_roles: dict[str, int] = defaultdict(int)
+    publication_statuses: dict[str, int] = defaultdict(int)
+    for source in accepted_sources:
+        source_roles[source.get("source_role") or "unknown"] += 1
+        publication_statuses[source.get("publication_status") or "UNKNOWN"] += 1
+    source_summary = {
+        "accepted_source_copies": len(accepted_sources),
+        "unique_work_families": len(accepted_work_ids),
+        "identity_confident_work_families": len({
+            _work_id_for_source(s) for s in accepted_sources
+            if float(s.get("work_identity_confidence", 0.35)) >= 0.70
+        }),
+        "research_paper_retrieval_class": sum(1 for s in accepted_sources if s.get("domain_type") == "research_paper"),
+        "news_retrieval_class": sum(1 for s in accepted_sources if s.get("domain_type") == "news"),
+        "web_retrieval_class": sum(1 for s in accepted_sources if s.get("domain_type") == "web"),
+        "full_fetch": sum(1 for s in accepted_sources if s.get("content_origin") == "fetch" and not s.get("fetch_failed")),
+        "unique_host_domains": len({s.get("host_domain") or s.get("registered_domain") for s in accepted_sources if s.get("host_domain") or s.get("registered_domain")}),
+        "source_roles": dict(sorted(source_roles.items())),
+        "publication_statuses": dict(sorted(publication_statuses.items())),
+        "note": "Source copies/hosts are not independent evidence. Independence is counted by identity-confident work_id families. Publication status is conservative and does not certify peer review unless externally established.",
+    }
+
+    manifest = {
+        "no_new_factual_claims": True,
+        "verified_claim_ids": [x["claim_id"] for x in resolved],
+        "provisional_or_unresolved_claim_ids": [x["claim_id"] for x in unresolved],
+        "factual_statement_rule": "Every factual statement in the final answer must map to a returned claim_id. Do not invent numerical thresholds, counts, dates, or causal claims.",
+        "synthesis_classes": {
+            "DIRECTLY_SUPPORTED": {
+                "rule": "Externally factual statement directly mapped to one resolved claim_id and its audited citations.",
+                "may_introduce_new_numbers_dates_or_causal_facts": False,
+            },
+            "DERIVED_INFERENCE": {
+                "rule": "Reasoning derived only from returned resolved claim_ids. Label explicitly as inference/analysis and list basis_claim_ids when material.",
+                "may_introduce_new_external_facts": False,
+            },
+            "SPECULATIVE_RECOMMENDATION": {
+                "rule": "Actionable recommendation or hypothesis not itself empirically established by the claim graph. Label explicitly as recommendation/speculation.",
+                "may_be_presented_as_verified_fact": False,
+            },
+        },
+        "inference_rule": "New reasoning is allowed only as DERIVED_INFERENCE with explicit basis claim IDs; it must not be presented as externally verified fact.",
+        "recommendation_rule": "Engineering or policy advice not directly established by a verified claim must be labeled SPECULATIVE_RECOMMENDATION. Do not invent quantitative thresholds unless a resolved claim contains them.",
+        "citation_rule": "Use only citations attached to resolved_claims for DIRECTLY_SUPPORTED factual assertions. Distinct URLs from one work_id are not independent citations.",
+        "tension_rule": "Recorded tension resolutions are DERIVED_INFERENCE from the client and must be labeled as analysis/inference unless separately represented by verified claims.",
+        "audit_language": {
+            "quote_integrity": "server-deterministic",
+            "evidence_entailment": "client-semantic judgment",
+            "confidence": "server-computed",
+            "citation_coverage": "server-audited",
+            "evidence_independence": "server-audited at underlying work_id level",
+            "host_provenance": "separate from publication provenance",
+        },
+        "server_metrics": {**state.get("metrics", {}), "elapsed_ms": _elapsed_ms(state)},
+        "source_summary": source_summary,
+    }
+
+    state["phase"] = "COMPLETE"
+    persist(state)
+    status = "COMPLETE" if not unresolved else "COMPLETE_WITH_UNRESOLVED"
+    return ResearchToolResponse(
+        status=status,
+        data={
+            "topic": state.get("topic"),
+            "mode": state.get("mode"),
+            "resolved_claims": resolved,
+            "unresolved_claims": unresolved,
+            "tensions": [dict(t, synthesis_class="DERIVED_INFERENCE") for t in state.get("claim_tensions", [])],
+            "superseded_claim_ids": state.get("superseded_claim_ids", []),
+            "quality_summary": _research_quality_summary(state),
+            "synthesis_manifest": manifest,
+        },
+        quality_gate={
+            "source_screening": "PASS",
+            "atomicity": "PASS",
+            "claim_resolution": "PASS" if not unresolved else "PARTIAL_BUDGET_LIMITED",
+            "tension_review": "PASS" if (not state.get("contested") or state.get("tension_review_done")) else "BLOCKED",
+            "server_quote_integrity": "PASS",
+            "client_semantic_entailment": "RECORDED",
+            "citation_coverage": "PASS",
+            "citation_work_independence": "PASS",
+        },
+        agent_rules=_agent_rules(),
+    )
+
+async def get_research_state(research_id: str) -> ResearchToolResponse:
+    """Debug/inspection tool. Returns compact protocol state, not full source text."""
+    state = load_state(research_id)
+    return ResearchToolResponse(
+        status="OK",
+        data={
+            "research_id": research_id,
+            "topic": state.get("topic"),
+            "mode": state.get("mode"),
+            "phase": state.get("phase"),
+            "contested": state.get("contested"),
+            "gap_rounds": state.get("gap_rounds"),
+            "max_gap_rounds": state.get("policy", {}).get("max_gap_rounds"),
+            "followup_rounds": state.get("followup_rounds"),
+            "max_followup_rounds": state.get("policy", {}).get("max_followup_rounds"),
+            "active_claims": [
+                {"claim_id": c["claim_id"], "text": c["text"], "atomicity_status": c.get("atomicity_status"),
+                 "disconfirmation_attempted": c.get("disconfirmation_attempted")}
+                for c in _active_claims(state)
+            ],
+            "source_counts": {
+                "total_source_copies": len(state.get("sources", {})),
+                "accepted_source_copies": sum(1 for s in state.get("sources", {}).values() if s.get("screen_status") == "ACCEPTED"),
+                "accepted_work_families": len({
+                    _work_id_for_source(s) for s in state.get("sources", {}).values()
+                    if s.get("screen_status") == "ACCEPTED"
+                }),
+                "rejected": sum(1 for s in state.get("sources", {}).values() if s.get("screen_status") in {"REJECTED", "AUTO_REJECTED"}),
+                "pending": sum(1 for s in state.get("sources", {}).values() if s.get("screen_status") == "PENDING"),
+                "deferred": sum(1 for s in state.get("sources", {}).values() if s.get("screen_status") == "DEFERRED"),
+            },
+            "debug_note": "get_research_state is inspection-only; normal execution should follow the previous tool's next_action without calling this tool.",
+            "metrics": state.get("metrics", {}),
+            "citation_audit": state.get("citation_audit"),
+            "elapsed_ms": _elapsed_ms(state),
+        },
+        agent_rules=_agent_rules(),
+    )
+
+async def check_server_config() -> ResearchToolResponse:
+    """Check API key, DNS, and live TinyFish Search/Fetch endpoint health."""
+    problems: list[str] = []
+    if not TINYFISH_API_KEY:
+        problems.append("TINYFISH_API_KEY is not set")
+    for label, url in (("search", TINYFISH_SEARCH_URL), ("fetch", TINYFISH_FETCH_URL)):
+        host = _domain_of(url)
+        try:
+            socket.getaddrinfo(host, 443)
+        except socket.gaierror:
+            problems.append(f"{label} endpoint host does not resolve: {host}")
+    if not problems:
+        try:
+            sr = await get_http_client().get(
+                TINYFISH_SEARCH_URL,
+                params={"query": "tinyfish config probe", "language": "en", "domain_type": "web"},
+                headers={"X-API-Key": TINYFISH_API_KEY},
+            )
+            if sr.status_code in {401, 403, 404, 405}:
+                problems.append(f"Search probe returned {sr.status_code}")
+        except Exception as exc:
+            problems.append(f"Search probe failed: {exc}")
+        try:
+            fr = await get_http_client().post(
+                TINYFISH_FETCH_URL,
+                json={"urls": ["https://www.tinyfish.ai/"], "format": "markdown", "per_url_timeout_ms": 12000},
+                headers={"X-API-Key": TINYFISH_API_KEY},
+            )
+            if fr.status_code in {401, 403, 404, 405}:
+                problems.append(f"Fetch probe returned {fr.status_code}")
+        except Exception as exc:
+            problems.append(f"Fetch probe failed: {exc}")
+    return ResearchToolResponse(
+        status="CONFIG_OK" if not problems else "CONFIG_PROBLEM",
