@@ -27,11 +27,11 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.11"
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.1.0
       - run: uv sync --frozen --all-extras
       - run: uv run ruff check .
       - run: uv run ruff format --check .
