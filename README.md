@@ -12,6 +12,7 @@ citation auditing and protocol state.
 - Python 3.11+
 - TinyFish API key
 - `uv` recommended
+- PostgreSQL for shared production deployments; SQLite is supported for local/single-instance use
 
 ## Install for development
 
@@ -33,6 +34,24 @@ Inspect the tool contract:
 npx @modelcontextprotocol/inspector --cli uv run tinyfish-research-mcp --method tools/list
 ```
 
+## Persistence
+
+Local development defaults to SQLite:
+
+```bash
+export RESEARCH_DB_PATH=research_state.db
+```
+
+For remote hosting, autoscaling or multiple replicas, use shared PostgreSQL:
+
+```bash
+export DATABASE_URL='postgresql://user:password@host:5432/database?sslmode=require'
+```
+
+The storage layer reloads state from durable storage for every tool call and uses optimistic
+version checks. Concurrent workers therefore cannot silently overwrite the same research session;
+a stale writer fails and can be retried by the client.
+
 ## Production structure
 
 ```text
@@ -42,7 +61,7 @@ src/tinyfish_research_mcp/
   models.py          Pydantic tool schemas
   core.py            research protocol and scoring engine
   providers.py       TinyFish / Crossref / OpenAlex / HTTP reliability
-  storage.py         SQLite state and source-content persistence
+  storage.py         SQLite/PostgreSQL durable state + source-content persistence
   observability.py   structured stderr logging + optional OpenTelemetry helpers
 ```
 
