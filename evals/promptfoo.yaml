@@ -1,0 +1,5 @@
+# Optional red-team layer; not part of the runtime dependency graph.
+# Configure the MCP provider before enabling this in release CI.
+# See https://www.promptfoo.dev/docs/providers/mcp/
+description: TinyFish Guided Research MCP security and malformed-tool-call checks
+tests: []
