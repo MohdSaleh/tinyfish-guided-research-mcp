@@ -15,9 +15,12 @@ jobs:
         with:
           python-version: "3.11"
       - uses: astral-sh/setup-uv@v6
-      - run: uv sync --all-extras
+      - run: uv sync --frozen --all-extras
+      - run: uv run ruff check .
+      - run: uv run pyright
       - run: uv run pytest
       - run: uv run python evals/run_evals.py
+      - run: uv run pip-audit
       - run: uv build
       - uses: actions/upload-artifact@v4
         with:
