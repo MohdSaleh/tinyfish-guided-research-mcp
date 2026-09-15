@@ -45,6 +45,6 @@ jobs:
       - run: uv run pip-audit
       - run: uv build
       - name: MCP Inspector smoke test
-        run: npx -y @modelcontextprotocol/inspector --cli uv run tinyfish-research-mcp --method tools/list --format json
+        run: npx -y @modelcontextprotocol/inspector --cli uv run tinyfish-guided-research-mcp --method tools/list --format json
         env:
           TINYFISH_API_KEY: test-key-not-used-by-tools-list
